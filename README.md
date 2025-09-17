@@ -34,7 +34,7 @@ where: &ensp; sequence: `[T×C]` double/single (time × channels)\
 
 ## Demo:
 For a quick demonstration, run `demo.m`.\
-The classifier scales to real data (e.g., surgical gesture recognition with 16 classes and 76 input channels); see the figure below.
+The classifier scales to real data (e.g., surgical gesture recognition with hundreds of thousands of parameters); see the figure below.
 
 ![preview](docs/preview.png)
 <br/><br/>
