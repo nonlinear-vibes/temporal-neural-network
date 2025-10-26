@@ -1,12 +1,12 @@
 # TemporalNeuralNet
-A modular deep learning model for multivariate time series. Originally built for the kinematical channels of the JIGSAWS surgical dataset, but generalizes well.
+A modular deep learning model for multivariate time series. Originally built for the kinematical channels of the JIGSAWS surgical dataset, but the architecture is generic.
 
 The pipeline is:
-- 1-D temporal CNN module (Conv / Pool) on each input channel for feature extraction
-- Recurrent module (vanilla RNN, GRU, or LSTM) for temporal modelling
+- 1-D temporal CNN module (Conv+Pool layers) on each input channel for feature extraction
+- Recurrent module (vanilla RNN, GRU, and LSTM units) for temporal modelling
 - Fully-connected classifier for final predictions
     
-All modules are optional, but the order CNN->RNN->FC is fixed.
+All modules and layers are optional, but the order CNN $\rightarrow$ RNN $\rightarrow$ FC is fixed.
 <br/><br/>
 
 ## Key methods:
@@ -14,11 +14,11 @@ All modules are optional, but the order CNN->RNN->FC is fixed.
   Constructs the network with the layer configurations specified by name-value pairs using He initialization and initializes training metrics using the validation set (`testData`).
 
 - **networkOutput = net.forward(obj, inputSequence)** \
-  Runs forward inference on a raw input sequence (T×C). Returns `[numSteps×numClasses]` softmax probabilities.
+  Runs the forward propagation on a raw input sequence of size (T×C). Returns `[numSteps×numClasses]` softmax probabilities.
 
 - **net.train(obj, trainingData, testData, epochs, batchSize, 'numSegments',S)**
-  Trains the network with backpropagation through time (BPTT) using Adam optimizer. Data seuences can be segmented into `numSegments` base segments for a total of `4 * numSegments - 3` overlapping training segments. Recurrent unit memory is reset between segments. \
-  Detailed backpropagation calculations for RNN, LSTM and GRU are included here: [Backprop Through Time — calculations](docs/BPTTcalculations.pdf)
+  Trains the network with backpropagation through time (BPTT) using Adam optimizer. Data sequences can be segmented into `numSegments` base segments for a total of `4 * numSegments - 3` overlapping training segments. Recurrent unit memory is reset between segments. \
+  I couldn't find the detailed backpropagation calculations for RNN, LSTM and GRU anywhere online, so I included them here: [Backprop Through Time — calculations](docs/BPTTcalculations.pdf)
 
 - **acc = net.evaluate(obj, testData)**\
   Computes classification accuracy on a test dataset.
@@ -33,8 +33,8 @@ where: &ensp; sequence: `[T×C]` double/single (time × channels)\
 <br/><br/>
 
 ## Demo:
-For a quick demonstration, run `demo.m`.\
-The classifier scales to real data (e.g., surgical gesture recognition with hundreds of thousands of parameters); see the figure below.
+For a quick demonstration with syntetic data generation, run `demo.m`.\
+The classifier scales well to real data (e.g., surgical gesture recognition with hundreds of thousands of parameters); see the figure below.
 
 ![preview](docs/preview.png)
 <br/><br/>
