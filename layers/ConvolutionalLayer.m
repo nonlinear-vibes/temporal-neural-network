@@ -2,8 +2,8 @@ classdef ConvolutionalLayer < handle
     %% ConvolutionalLayer: separate kernels scanning through each channel
     properties
         numChannels
-        inputLayers
-        numKernels
+        inFeatures
+        outFeatures
         kernelSize
         weights
         biases
@@ -19,19 +19,19 @@ classdef ConvolutionalLayer < handle
     %%
     methods
         %% ConvolutionalLayer constructor
-        function obj = ConvolutionalLayer(numChannels, inputLayers, numKernels, kernelSize)
-            obj.numChannels = numChannels;    % number of input channels
-            obj.inputLayers = inputLayers;    % number of feature maps input (depth)
-            obj.numKernels  = numKernels;     % number of output kernels per channel
-            obj.kernelSize  = kernelSize;     % length of the each kernel
+        function obj = ConvolutionalLayer(numChannels, inFeatures, outFeatures, kernelSize)
+            obj.numChannels = numChannels;  % number of input channels
+            obj.inFeatures  = inFeatures;   % number of feature maps input (depth)
+            obj.outFeatures = outFeatures;  % number of output kernels per channel
+            obj.kernelSize  = kernelSize;   % length of the each kernel
             
             % He initialization for conv filters
-            scale       = sqrt(2/(kernelSize*inputLayers));
-            obj.weights = randn(kernelSize, numChannels, numKernels, inputLayers) * scale;
+            scale       = sqrt(2/(kernelSize*inFeatures));
+            obj.weights = randn(kernelSize, numChannels, outFeatures, inFeatures) * scale;
 
             % Initialize biases to negative mean of weights
             meanWeights = squeeze(mean(obj.weights,1));
-            biasValues  = mean(meanWeights,3); % *(-1)?
+            biasValues  = mean(meanWeights,3);
 
             if size(biasValues,1) == 1
                 obj.biases = -biasValues'; 
@@ -51,35 +51,34 @@ classdef ConvolutionalLayer < handle
 
             % Leaky-ReLU parameter
             obj.a = 0.01;
-
         end
         
         %% Forward: 1D convolutions over time
         function as = forward(obj, input, varargin)
-            % input: [T×numChannels×inputLayers]
+            % input: [T×numChannels×inFeatures]
 
             doCache  = ~isempty(varargin) && strcmp(varargin{1}, 'train');
 
             numSteps = size(input,1) - obj.kernelSize + 1;
 
-            as = zeros(numSteps, obj.numChannels, obj.numKernels);  % activations
-            zs = zeros(numSteps, obj.numChannels, obj.numKernels);  % pre-activations
+            as = zeros(numSteps, obj.numChannels, obj.outFeatures);  % activations
+            zs = zeros(numSteps, obj.numChannels, obj.outFeatures);  % pre-activations
 
             % Perform convolution
             for i = 1:numSteps
                 step_Index = 1 + (i-1);
-                for k = 1:obj.numKernels
+                for k = 1:obj.outFeatures
                     dotproduct = input(step_Index:step_Index+obj.kernelSize-1,:,:) .* squeeze(obj.weights(:,:,k,:));
                     z = sum(dotproduct);
                     if length(size(z)) ~= 2
                         z = sum(z,4);
-                        z = reshape(z,[obj.numChannels,obj.inputLayers])';
+                        z = reshape(z,[obj.numChannels,obj.inFeatures])';
                         if size(z,1) ~= 1
                             z = sum(z);
                         end
                     end
                     zs(i,:,k) = z + obj.biases(:,k)';
-                    as(i,:,k) = ReLU(zs(i,:,k),obj.a);
+                    as(i,:,k) = leakyReLU(zs(i,:,k),obj.a);
                 end
             end
 
@@ -91,8 +90,8 @@ classdef ConvolutionalLayer < handle
         end
 
         %% Backprop: propagate gradients into input and update gradients
-        function d_input = backprop(obj, d_output)
-            % d_output: [T×numChannels×numKernels]
+        function [d_input, dW_new, db_new] = backprop(obj, d_output)
+            % d_output: [T×numChannels×outFeatures]
 
             d_input  = zeros(size(obj.acts));
             numSteps = size(obj.acts,1)-obj.kernelSize+1;
@@ -102,23 +101,18 @@ classdef ConvolutionalLayer < handle
             db_new   = zeros(size(obj.biases));
         
             % Loop kernels and time for gradient computation
-            for k = 1:obj.numKernels
+            for k = 1:obj.outFeatures
                 for j = 1:obj.kernelSize
-                    D = obj.acts(j:end-obj.kernelSize+j,:,:) .* ReLU_prime(obj.preacts(:,:,k),obj.a);
+                    D = obj.acts(j:end-obj.kernelSize+j,:,:) .* leakyReLU_prime(obj.preacts(:,:,k),obj.a);
                     dW_new(j,:,k,:) = squeeze(sum(D .* d_output(:,:,k),1));
                     if j == 1
                         for i = 1:numSteps
-                            d_input(i:i+obj.kernelSize-1,:,:) = d_input(i:i+obj.kernelSize-1,:,:) + squeeze(obj.weights(:,:,k,:)).*reshape(ReLU(obj.preacts(i,:,k),obj.a).*d_output(i,:,k),[1,obj.numChannels,1]);
+                            d_input(i:i+obj.kernelSize-1,:,:) = d_input(i:i+obj.kernelSize-1,:,:) + squeeze(obj.weights(:,:,k,:)).*reshape(leakyReLU_prime(obj.preacts(i,:,k),obj.a).*d_output(i,:,k),[1,obj.numChannels,1]);
                         end
                     end
                 end
-                db_new(:,k) = sum(d_output(:,:,k).*ReLU_prime(obj.preacts(:,:,k),obj.a))';
+                db_new(:,k) = sum(d_output(:,:,k).*leakyReLU_prime(obj.preacts(:,:,k),obj.a))';
             end
-
-            % Update gradient buffers
-            obj.dW = obj.dW + dW_new;
-            obj.db = obj.db + db_new;
-
         end
 
         %% ApplyAdam: update weights and biases using Adam rule
@@ -144,11 +138,11 @@ classdef ConvolutionalLayer < handle
 end
 
 %% ReLU & ReLU'
-function s = ReLU(z, a)
+function s = leakyReLU(z, a)
     s = max(a*z,z);
 end
 
-function s = ReLU_prime(z, a)
+function s = leakyReLU_prime(z, a)
     s = ones(size(z));
     s(z < 0) = a;
 end

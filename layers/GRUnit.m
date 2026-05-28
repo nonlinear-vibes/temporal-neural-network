@@ -6,7 +6,7 @@ classdef GRUnit < handle
         outSize
         biases
         weights
-        hiddenState
+        hState
         dLdh
         acts
         zs, rs, hhats
@@ -26,22 +26,20 @@ classdef GRUnit < handle
             obj.outSize = outSize;
 
             % Initialize weight matrices with He-normal scaling
-            obj.weights    = cell(1,3);
-            obj.weights{1} = randn(outSize,inSize+outSize)*sqrt(2/(outSize*(inSize+outSize)));  % Wxz & Whz
-            obj.weights{2} = randn(outSize,inSize+outSize)*sqrt(2/(outSize*(inSize+outSize)));  % Wxr & Whr 
-            obj.weights{3} = randn(outSize,inSize+outSize)*sqrt(2/(outSize*(inSize+outSize)));         % Wxh & Whh
+            obj.weights{1} = randn(outSize,inSize+outSize)*sqrt(2/(inSize+outSize));  % [Wxz, Whz]
+            obj.weights{2} = randn(outSize,inSize+outSize)*sqrt(2/(inSize+outSize));  % [Wxr, Whr]
+            obj.weights{3} = randn(outSize,inSize+outSize)*sqrt(2/(inSize+outSize));  % [Wxh, Whh]
 
             % Initialize biases to offset mean of incoming weights
-            obj.biases    = cell(1,3);
             obj.biases{1} = -mean(obj.weights{1},2);    % bz
             obj.biases{2} = -mean(obj.weights{2},2);    % br
             obj.biases{3} = -mean(obj.weights{3},2);    % bh
 
             % Initialize hidden state
-            obj.hiddenState = zeros(outSize, 1);
+            obj.hState = zeros(outSize, 1);
             
             % accumulated backprop gradient dE/dh for previous time step
-            obj.dLdh        = zeros(size(obj.hiddenState,1), size(obj.hiddenState,2));
+            obj.dLdh        = zeros(size(obj.hState,1), size(obj.hState,2));
 
             % Leaky-ReLU parameter
             obj.a = 0.01;
@@ -51,8 +49,6 @@ classdef GRUnit < handle
             obj.zs    = [];
             obj.rs    = [];
             obj.hhats = [];
-            obj.dW    = cell(size(obj.weights));
-            obj.db    = cell(size(obj.biases));
 
             % Initialize Adam moment buffers
             for j = 1:numel(obj.weights)
@@ -66,7 +62,7 @@ classdef GRUnit < handle
         end
 
         %% Forward: single time-step. Optionally cache history if 'train' flag
-        function a_out = forward(obj, x_in, varargin)
+        function a_out = forward(obj, x_in, numSteps, t, varargin)
             % x_in  - input data, row vector [1×inputSize]
             % a_out - output data, row vector [1×outputSize]
 
@@ -75,34 +71,42 @@ classdef GRUnit < handle
             % columnize input for matrix ops
             x_in   = x_in';
             
-            z_pre = obj.weights{1} * [x_in; obj.hiddenState(:,end)] + obj.biases{1};
+            z_pre = obj.weights{1} * [x_in; obj.hState(:,t)] + obj.biases{1};
             z = sigm(z_pre);
 
-            r_pre = obj.weights{2} * [x_in; obj.hiddenState(:,end)] + obj.biases{2};
+            r_pre = obj.weights{2} * [x_in; obj.hState(:,t)] + obj.biases{2};
             r = sigm(r_pre);
 
-            hhat = tanh(obj.weights{3} * [x_in; r.*obj.hiddenState(:,end)]);
+            hhat = tanh(obj.weights{3} * [x_in; r.*obj.hState(:,t)] + obj.biases{3});
 
-            h = z .* obj.hiddenState(:,end) + (1 - z) .* hhat;
+            h = z .* obj.hState(:,t) + (1 - z) .* hhat;
 
             % convert back to row form
             a_out = h';
 
             if doCache
+                if isempty(obj.acts)
+                    % initialize activation and hidden state cache
+                    obj.hState  = zeros(length(h),numSteps+1);
+                    obj.acts    = zeros(length(x_in),numSteps);
+                    obj.zs      = zeros(length(z),numSteps);
+                    obj.rs      = zeros(length(r),numSteps);
+                    obj.hhats   = zeros(length(hhat),numSteps+1);
+                end
                 % append to history for BPTT...
-                obj.hiddenState = [obj.hiddenState, h];
-                obj.acts        = [obj.acts, x_in];
-                obj.zs          = [obj.zs, z];
-                obj.rs          = [obj.rs, r];
-                obj.hhats       = [obj.hhats, hhat];
+                obj.hState(:,t+1) = h;
+                obj.acts(:,t)     = x_in;
+                obj.zs(:,t)       = z;
+                obj.rs(:,t)       = r;
+                obj.hhats(:,t+1)  = hhat;
             else
                 % or keep only the last state for inference
-                obj.hiddenState = h;
+                obj.hState = h;
             end
         end
 
         %% Backprop: one-step truncated BPTT update
-        function d_in = backprop(obj, d_out, t_idx)
+        function [d_in, dW_new, db_new] = backprop(obj, d_out, t_idx)
             % d_out - gradient from next layer, row [1×outputSize] 
             % t_idx - time index to reference the stored history
             % d_in  - gradient to previous layer, row [1×inputSize] 
@@ -113,7 +117,7 @@ classdef GRUnit < handle
 
             d_out = d_out';
 
-            h_prev = obj.hiddenState(:,t_idx);
+            h_prev = obj.hState(:,t_idx);
             xt     = obj.acts(:,t_idx);
             zt     = obj.zs(:,t_idx);
             rt     = obj.rs(:,t_idx);
@@ -129,29 +133,24 @@ classdef GRUnit < handle
             delta   = d_out + obj.dLdh;
             delta_z = delta .* (h_prev - hhatt) .* zt .* (1 - zt);
             delta_h = delta .* (1-zt) .* (1-hhatt.^2);
-            % delta_r = Uh * delta_h .* h_prev .* rt.* (1-rt);
             delta_r = Uh' * delta_h .* h_prev .* rt .* (1-rt);
             
         
             % Gradients w.r.t. hidden‐layer and output-layer parameters
+            % ∂E/∂Wx
             dW_new{1} = delta_z * [xt; h_prev]';
             dW_new{2} = delta_r * [xt; h_prev]';
-            dW_new{3} = delta_h * [xt; rt .* h_prev]';      % ∂E/∂Wx
+            dW_new{3} = delta_h * [xt; rt .* h_prev]';
             
+            % ∂E/∂b
             db_new{1} = delta_z;
             db_new{2} = delta_r;
-            db_new{3} = delta_h;             % ∂E/∂bh
+            db_new{3} = delta_h;             
             
-        
             % Package errors for next step
             obj.dLdh = delta.*zt + Uz'*delta_z + Uh'*(delta_h.*rt) + Ur'*delta_r;  % push ∂E/∂h_prev back in time
             d_in  = Wz'*delta_z + Wh'*delta_h + Wr'*delta_r;                       % propagate error into input
             d_in  = d_in';                                                         % back to row form
-
-            % accumulate gradients
-            obj.dW = cellfun(@(x,y) x + y, obj.dW, dW_new, 'UniformOutput', false);
-            obj.db = cellfun(@(x,y) x + y, obj.db, db_new, 'UniformOutput', false);
-       
         end
 
         %% ApplyAdam: update weights and biases with Adam
@@ -163,8 +162,8 @@ classdef GRUnit < handle
         %% Resets
         function resetMemory(obj)
             % Clear hidden-state history, BPTT gradient accumulator and stored activations
-            obj.hiddenState = zeros(length(obj.biases{1}),1);
-            obj.dLdh        = zeros(size(obj.hiddenState,1), size(obj.hiddenState,2));
+            obj.hState = zeros(length(obj.biases{1}),1);
+            obj.dLdh        = zeros(size(obj.hState));
             obj.acts  = [];
             obj.zs    = [];
             obj.rs    = [];
@@ -186,5 +185,6 @@ end
 
 %%
 function s = sigm(z)
+    z = max(min(z,50),-50); % numerical stabilization
     s = 1./(1+exp(-z));
 end

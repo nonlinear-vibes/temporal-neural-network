@@ -1,80 +1,76 @@
 classdef TemporalNeuralNet < handle
-    %% TEMPORALNEURALNET: configurable CNN → RNN/GRU/LSTM → FC sequence classifier
+    %% TEMPORALNEURALNET: configurable CNN -> RNN/GRU/LSTM -> FC sequence classifier
     % 
-    % A modular deep learning model for multivariate time series. The pipeline is:
-    %   1) 1-D temporal CNN module (Conv / Pool) for feature extraction
+    % A modular deep learning model for multivariate time series with dense sequence 
+    % labeling, where each timestep has an associated one-hot target vector.
+    % The pipeline is:
+    %   1) 1-D temporal CNN module (Conv / Pool layers) for feature extraction
     %   2) Recurrent module (vanilla RNN, GRU, or LSTM) for temporal modelling
     %   3) Fully-connected classifier for final predictions
     %   All modules are optional, but the order CNN->RNN->FC is fixed.
     %
     % ───────────────────────────────────────────────────────────────────────────
     % KEY METHODS:
-    %   net = TemporalNeuralNet(testData, Name, Value, ...) 
+    %   net = TemporalNeuralNet(validationData, Name,Value, ...) 
     %       Constructs the network with the layer configurations specified by name-value pairs and
-    %       initializes training metrics using the validation set (testData).
+    %       initializes training metrics using the validation set (validationData).
     %
-    %   networkOutput = forward(obj, inputSequence)
-    %       Runs inference on a raw input sequence (T×C). Returns [numSteps×numClasses]
-    %       softmax probabilities.
+    %   networkOutput = net.forward(inputSequence)
+    %       Runs inference on a raw input sequence (T×C). Returns per-timestep class probabilities 
+    %       [numSteps×numClasses] after softmax normalization.
     %
-    %   train(obj, trainingData, testData, epochs, batchSize, 'numSegments',S)
-    %       Trains with overlapping segments and Adam.
+    %   net.train(trainingData, validationData, epochs, batchSize, 'numSegments',S)
+    %       Trains the network using overlapping input segments and Adam optimizer.
     %
-    %   acc = evaluate(obj, testData)
+    %   acc = net.evaluate(testData)
     %       Computes classification accuracy on a test dataset.
-    %
-    %   segmInfos = segmentSequences(~, trainingData, numSegments)
-    %       Generates overlapping segment indices for training.
-    %
-    %   resetMemory(obj) / resetGrads(obj) / adamOptimizer(obj, m)
-    %       Clears recurrent and any stored activation states before a new sequence.
-    %       Zeroes gradient accumulators before each batch.
-    %       Applies Adam updates to all network parameters.
     %
     % ───────────────────────────────────────────────────────────────────────────
     % DATA FORMAT
-    %   trainingData/testData: N×2 cell array. Each row:
+    %   trainingData/validationData/testData: N×2 cell array. Each row:
     %     { sequence, labels }
-    %       sequence : [T×C] double/single (time × channels)
+    %       sequence : [T×C] double/single (time × numChannels)
     %       labels   : [T×K] one-hot (K = numClasses)
     %
     % ───────────────────────────────────────────────────────────────────────────
     % NAME–VALUE CONSTRUCTOR ARGS
     %   'CNN'    : cell array defining convolutional and pooling layers ({}):
-    %                {'conv', numChannels, inputLayers, numKernels, kernelSize}
+    %                {'conv', numChannels, inFeatures, outFeatures, kernelSize}
     %                {'pool', poolingRatio}
-    %                note: 'conv' must always be followed by 'pool', but 'poolingRatio = 1' can be given
     %   'RNN'    : cell array of recurrent specs ({}). Each spec is one of:
     %                {'rnn',  inDim, hiddenDim, outDim}
     %                {'gru',  inDim, outDim}
     %                {'lstm', inDim, outDim}
     %   'FC'     : specification for the fully connected classifier ({}):
     %                { [in, h1, ..., numClasses] }
-    %   'tPool'  : length of time segments received by the RNN/FC (2)
-    %   'numClasses' : number of output classes (size of final output) (16)
+    %   'tPool'  : number of consecutive temporal feature slices grouped and passed to
+    %              the recurrent or fully connected module. (2)
+    %   'numClasses' : number of output classes (second dimension of the final output) (16)
     %   'eta'    : base Adam learning rate (20)
     %   'learningRateDecay' : decay per epoch (0.95)
     %   'beta_1' : Adam β1 (0.90)
     %   'beta_2' : Adam β2 (0.999)
-    %   'timeStep' : integer step size used when NO RNN stack is present (1)
+    %   'timeStep' : stride between evaluated timesteps when no recurrent module is present,
+    %                used to reduce forward-pass computational cost (tPool)
     %
     %   Note: The input/output sizes of consecutive layers must match: 
-    %         - In CNN layers, 'inputLayers' must be eual to the 'numKernels' of the
+    %         - In CNN layers, 'inFeatures' must be equal to the 'outFeatures' of the
     %           previous layer.
     %         - The input size of the recurrent or fully connected module following the 
-    %           CNN module must be: inDim = numChannels * numKernels * tPool
+    %           CNN module must be: inDim = numChannels * outFeatures * tPool
     %         - If there is no convolutional module, the input of the
     %           recurrent/fully connected module is: inDim = numChannels * tPool
     %
-    %           Derived parameters:
-    %           CNNwindowSize – raw timesteps covered by one CNN output step
-    %           CNNstepSize   – raw step size of the CNN window (of size CNNwindowSize)
-    %           Receptive field per output step:
-    %               RF = CNNwindowSize + (tPool − 1)*CNNstepSize
+    %  Derived parameters:
+    %  cnnWindowSize – raw timesteps covered by one CNN output step
+    %  cnnStepSize   – raw step size of the CNN window (of size cnnWindowSize)
+    %                   Receptive field per output step:
+    %                   RF = cnnWindowSize + (tPool - 1)*cnnStepSize
+    %  idxMap        - stores index boundaries used to split flattened accumulated
+    %                  gradient vectors back into per-layer weight and bias tensors
     %
     % ───────────────────────────────────────────────────────────────────────────
-    % USAGE EXAMPLE
-    %   % CNN + LSTM + FC
+    % USAGE EXAMPLE (CNN + LSTM + GRU + FC)
     %   convSpecs = { ...
     %   {'conv', 76, 1, 2, 3}, ...
     %   {'pool', 2}, ...
@@ -90,112 +86,160 @@ classdef TemporalNeuralNet < handle
     %
     %   fcSpecs = { [114, 16] };
     %
-    %   net  = TemporalNeuralNet(testData, 'CNN',convSpecs, 'RNN',rnnSpecs, 'FC',fcSpecs, ...
+    %   net  = TemporalNeuralNet(validationData, 'CNN',convSpecs, 'RNN',rnnSpecs, 'FC',fcSpecs, ...
     %                            'tPool',1, 'numClasses',16, 'eta',10);
 
     %%
     properties
-        CNNmodule
-        RNNmodule
-        FCmodule
+        cnnModule
+        rnnModule
+        fcModule
 
         tPool
         numClasses
-
-        CNNwindowSize
-        CNNstepSize
         timeStep
+
+        cnnWindowSize
+        cnnStepSize
+        idxMap
         
         eta
         beta_1
         beta_2
         epsilon
-        t
         learningRateDecay
-
+        t
+        
         learningHistory
-        totalEntropy_vec
-        trainingaccuracy_vec
+        totalEntropyHistory
+        trainingAccuracyHistory
     end
     
     %%
     methods
         %% TemporalNeuralNet constructor
-        function obj = TemporalNeuralNet(testData, varargin)
+        function obj = TemporalNeuralNet(validationData, varargin)
 
             p = inputParser;
             addParameter(p,'CNN',               {},   @(x) iscell(x));
             addParameter(p,'RNN',               {},   @(x) iscell(x));
             addParameter(p,'FC',                {},   @(x) iscell(x));
-            addParameter(p,'tPool',             2,    @(x) isnumeric(x)&&isscalar(x));
+            addParameter(p,'tPool',             1,    @(x) isnumeric(x)&&isscalar(x));
             addParameter(p,'numClasses',        16,   @(x) isnumeric(x)&&isscalar(x));
-            addParameter(p,'eta',               20,  @(x) isnumeric(x)&&isscalar(x));
+            addParameter(p,'eta',               20,   @(x) isnumeric(x)&&isscalar(x));
             addParameter(p,'learningRateDecay', 0.95, @(x) isnumeric(x)&&isscalar(x));
             addParameter(p,'beta_1',            0.90, @(x) isnumeric(x)&&isscalar(x));
             addParameter(p,'beta_2',            0.999,@(x) isnumeric(x)&&isscalar(x));
-            addParameter(p,'timeStep',          1,    @(x) isnumeric(x)&&isscalar(x));
+            addParameter(p,'timeStep',          [],   @(x) isnumeric(x)&&isscalar(x));
             parse(p, varargin{:});
 
-            % Hyperparam
+            % Hyperparams
             convSpecs      = p.Results.CNN;
             rnnSpecs       = p.Results.RNN;
             fcSpecs        = p.Results.FC;
             obj.tPool      = p.Results.tPool;
             obj.numClasses = p.Results.numClasses;
-            obj.timeStep   = p.Results.timeStep;
+            if isempty(p.Results.timeStep)
+                obj.timeStep = p.Results.tPool;
+            elseif ~isempty(rnnSpecs)
+                warning("Recurrent layer is present, setting 'timeStep' to %d.", obj.tPool);
+                obj.timeStep = p.Results.tPool;
+            else
+                obj.timeStep = p.Results.timeStep;
+            end
 
             % Build convolutional and pooling layers
-            obj.CNNmodule = cell(size(convSpecs));
+            obj.cnnModule = cell(size(convSpecs));
             for i = 1:numel(convSpecs)
                 spec = convSpecs{i};
                 switch spec{1}
                     case 'conv'
-                        obj.CNNmodule{i} = ConvolutionalLayer(spec{2},spec{3},spec{4},spec{5});
+                        obj.cnnModule{i} = ConvolutionalLayer(spec{2},spec{3},spec{4},spec{5});
                     case 'pool'
-                        obj.CNNmodule{i} = PoolingLayer(spec{2});
+                        obj.cnnModule{i} = PoolingLayer(spec{2});
                     otherwise
                         error('Unknown conv spec: %s', spec{1});
                 end
             end
         
             % Build recurrent layers
-            obj.RNNmodule = cell(size(rnnSpecs));
+            obj.rnnModule = cell(size(rnnSpecs));
             for i = 1:numel(rnnSpecs)
                 spec = rnnSpecs{i};
                 switch spec{1}
                     case 'rnn'
-                        obj.RNNmodule{i} = RecurrentUnit(spec{2},spec{3},spec{4});
+                        obj.rnnModule{i} = RecurrentUnit(spec{2},spec{3},spec{4});
                     case 'lstm'
-                        obj.RNNmodule{i} = LSTMUnit(spec{2},spec{3});
+                        obj.rnnModule{i} = LSTMUnit(spec{2},spec{3});
                     case 'gru'
-                        obj.RNNmodule{i} = GRUnit(spec{2},spec{3});
+                        obj.rnnModule{i} = GRUnit(spec{2},spec{3});
                     otherwise
                         error('Unknown RNN spec: %s', spec{1});
                 end
             end
         
             % Build fully connected classifier
-            obj.FCmodule = cell(size(fcSpecs));
+            obj.fcModule = cell(size(fcSpecs{1}));
             if ~isempty(fcSpecs)
                 if numel(fcSpecs{1}) < 2
-                    error('fcSpecs must contain at least two layer sizes (input and output).');
+                    error('fcSpecs must contain at least two sizes (input and output).');
                 else
-                    obj.FCmodule = FullyConnectedNetwork(fcSpecs);
+                    obj.fcModule = FullyConnectedNetwork(fcSpecs{1});
                 end
             end
         
             % Derived window parameters
-            % windowSize: number of raw timesteps covered by one RNN input frame (multiple timesteps pooled together)
-            % stepSize: downsampled step between successive RNN inputs (single timestep)
-            obj.CNNwindowSize = 1;
-            obj.CNNstepSize   = 1;
-            for i = numel(obj.CNNmodule):-1:1
-                layer = obj.CNNmodule{i};
+            % cnnWindowSize: number of raw timesteps covered by one RNN input frame (multiple timesteps pooled together)
+            % cnnStepSize: downsampled step between successive RNN inputs (single timestep)
+            obj.cnnWindowSize = 1;
+            obj.cnnStepSize   = 1;
+            for i = numel(obj.cnnModule):-1:1
+                layer = obj.cnnModule{i};
                 if isa(layer, 'ConvolutionalLayer')
-                    obj.CNNwindowSize = obj.CNNwindowSize + obj.CNNmodule{i}.kernelSize - 1;
+                    obj.cnnWindowSize     = obj.cnnWindowSize + layer.kernelSize - 1;
                 elseif isa(layer, 'PoolingLayer')
-                    obj.CNNwindowSize = obj.CNNwindowSize * obj.CNNmodule{i}.poolingRatio;
-                    obj.CNNstepSize   = obj.CNNstepSize*obj.CNNmodule{i}.poolingRatio;
+                    obj.cnnWindowSize     = obj.cnnWindowSize * layer.poolingRatio;
+                    obj.cnnStepSize       = obj.cnnStepSize   * layer.poolingRatio;
+                end
+            end
+
+            % Index map to slice gradient vectors
+            obj.idxMap.cnnStrt = 1;
+            obj.idxMap.cnnEnd  = [];
+            obj.idxMap.fcStrt  = 1;
+            obj.idxMap.fcEnd   = [];
+
+            for i = 1:numel(obj.cnnModule)
+                layer = obj.cnnModule{i};
+                if isa(layer, "ConvolutionalLayer")
+                    numParams = numel(layer.weights) + numel(layer.biases);
+                    obj.idxMap.cnnEnd  = [obj.idxMap.cnnEnd;  obj.idxMap.cnnStrt(end) + numParams - 1];
+                    obj.idxMap.cnnStrt = [obj.idxMap.cnnStrt; obj.idxMap.cnnStrt(end) + numParams];
+                end
+            end
+
+            obj.idxMap.rnn = cell(numel(obj.rnnModule),1); % {[start, end]}
+
+            if ~isempty(obj.rnnModule)
+                obj.idxMap.rnn{1} = [];
+                for i = 1:numel(obj.rnnModule)
+                    layer = obj.rnnModule{i};
+                    strtIdx = 1;
+                    endIdx  = 0;
+                    for j = 1:numel(layer.weights)
+                        numParams = numel(layer.weights{j}) + numel(layer.biases{j});
+                        endIdx    = endIdx + numParams;
+                        obj.idxMap.rnn{i} = [obj.idxMap.rnn{i}; [strtIdx, endIdx]];
+                        strtIdx = strtIdx + numParams;
+                    end
+                end
+            end
+
+            if ~isempty(obj.fcModule)
+                for i = 1:numel(obj.fcModule.sizes)-1
+                    numParams = numel(obj.fcModule.weights{i}) + numel(obj.fcModule.biases{i});
+                    obj.idxMap.fcEnd  = [obj.idxMap.fcEnd;  obj.idxMap.fcStrt(end) + numParams - 1];
+                    obj.idxMap.fcStrt = [obj.idxMap.fcStrt; obj.idxMap.fcStrt(end) + numParams];
                 end
             end
         
@@ -204,53 +248,55 @@ classdef TemporalNeuralNet < handle
             obj.learningRateDecay = p.Results.learningRateDecay;
             obj.beta_1            = p.Results.beta_1;
             obj.beta_2            = p.Results.beta_2;
-            obj.epsilon           = 10^-8;  % Small number to avoid division-by-zero
+            obj.epsilon           = 1e-8;   % Small number to avoid division-by-zero
             obj.t                 = 1;      % Adam time-step counter
         
             % Initialize learning metrics and history
-            initialAcc       = evaluate(obj, testData);
-            % learningHistory columns: [batchSize, avgSegmLen, eta, valAccuracy, trainAccuracy, loss, elapsedTime]
+            initialAcc       = evaluate(obj, validationData);
+            % learningHistory columns: [batchSize, avgSegmLen, eta, valAccuracy, trainAccuracy, trainLoss, elapsedTime]
             obj.learningHistory      = [0, 0, 0, initialAcc, NaN, NaN, NaN];
-            obj.totalEntropy_vec     = [];
-            obj.trainingaccuracy_vec = [];
+            obj.totalEntropyHistory     = [];
+            obj.trainingAccuracyHistory = [];
         end
     
         %% Forward: Execute the network on an input sequence
         function networkOutput = forward(obj, inputSequence)
             % Input:  inputSequence - [inputLength × numChannels] raw time-series
-            % Output: networkOutput - [numSteps × numClasses] softmax probabilities per time step
+            % Output: networkOutput - [numSteps × numClasses] softmax probabilities per timestep
     
-            % CNN
-            for i = 1:numel(obj.CNNmodule)
-                inputSequence = obj.CNNmodule{i}.forward(inputSequence);
+            % CNN (processes the whole sequence)
+            for i = 1:numel(obj.cnnModule)
+                inputSequence = obj.cnnModule{i}.forward(inputSequence);
             end
         
             % Number of RNN/FC steps
-            if isempty(obj.RNNmodule)
-                numSteps = floor((size(inputSequence,1)-obj.tPool+1)/obj.tPool);
+            if isempty(obj.rnnModule)
+                stepSize = obj.timeStep;
             else
-                numSteps = floor(size(inputSequence,1)/obj.tPool);
+                stepSize = obj.tPool;
             end
+            numSteps = floor((size(inputSequence,1)-obj.tPool)/stepSize) + 1;
+            % floor((N - windowSize)/stepSize) + 1
 
             networkOutput = zeros(numSteps,obj.numClasses);
         
-            % Process each time step by RNN and FCL
+            % Process each timestep by RNN and FCL
             for j = 1:numSteps
                 % Extract the j-th block of size [numTimeSegments × featureDim]
-                startIdx = (j-1)*obj.tPool+1;
+                startIdx = (j-1)*stepSize+1;
                 block = inputSequence(startIdx:startIdx+obj.tPool-1,:);
                 
                 % Flatten into a row vector for RNN/FC input
                 inputStep = reshape(block,1,[]);
         
                 % RNN
-                for i = 1:numel(obj.RNNmodule)
-                    inputStep = obj.RNNmodule{i}.forward(inputStep);
+                for i = 1:numel(obj.rnnModule)
+                    inputStep = obj.rnnModule{i}.forward(inputStep, numSteps, 1);
                 end
         
                 % FCL
-                if ~isempty(obj.FCmodule)
-                    inputStep = obj.FCmodule.forward(inputStep);
+                if ~isempty(obj.fcModule)
+                    inputStep = obj.fcModule.forward(inputStep, numSteps, j);
                 end
         
                 % Softmax
@@ -259,14 +305,14 @@ classdef TemporalNeuralNet < handle
         end
     
         %% Train: Optimize network
-        function train(obj, trainingData, testData, epochs, batchSize, varargin)
+        function train(obj, trainingData, validationData, epochs, batchSize, varargin)
             % Inputs:
-            %   trainingData : cell array {sequence, labels}
-            %   testData     : data for validation in each epoch
-            %   epochs       : number of full data passes
-            %   numSegments  : number of non-overlapping segments
-            %   batchSize    : segments per update
-            %   trains with no regard to temporal dependencies if no numSegments is given (e.g. in case of no RNN module)
+            %   trainingData   : cell array {sequence, labels}
+            %   validationData : data for validation in each epoch
+            %   epochs         : number of full data passes
+            %   numSegments    : number of non-overlapping segments
+            %   batchSize      : segments per update
+            %   trains with no regard to temporal dependencies if no 'numSegments' is given (e.g. in case of no RNN module)
 
             p = inputParser;
             addParameter(p,'numSegments', [], @(x) isnumeric(x));
@@ -279,8 +325,8 @@ classdef TemporalNeuralNet < handle
             % Precompute segment info: [trialIdx, startIdx, endIdx]
             segmInfos = segmentSequences(obj, trainingData, numSegments);
 
-            numConvLayers = numel(obj.CNNmodule);
-            numRecLayers  = numel(obj.RNNmodule);
+            numConvLayers = numel(obj.cnnModule);
+            numRecLayers  = numel(obj.rnnModule);
 
             % Go through the epochs
             for epochIdx = 1:epochs
@@ -308,11 +354,43 @@ classdef TemporalNeuralNet < handle
                     % List of segments in the batch
                     rows      = randIdxList((b-1)*batchSize+1:min(b*batchSize,numel(randIdxList)));
                     batchInfo = segmInfos(rows, :);
-                    
+
+                    % Preallocate arrays to store gradient updates for each parallel worker separately
+                    cnnUpdateSize = 0;
+                    if ~isempty(obj.idxMap.cnnEnd)
+                        cnnUpdateSize = obj.idxMap.cnnEnd(end);
+                    end
+
+                    fcUpdateSize = 0;
+                    if ~isempty(obj.idxMap.fcEnd)
+                        fcUpdateSize = obj.idxMap.fcEnd(end);
+                    end
+
+                    cnnBatchUpdate = zeros(cnnUpdateSize,1);
+                    fcBatchUpdate  = zeros(fcUpdateSize, 1);
+                    if ~isempty(obj.rnnModule)
+                        rnnBatchUpdate = zeros(obj.idxMap.rnn{end}(end,2),1);
+                    end
+                                        
                     % Go through the segments
-                    for segmIdx = 1:size(batchInfo,1)
+                    parfor segmIdx = 1:size(batchInfo,1)
+                        
+                        % Initialize temporary variables to suppress warnings
+                        mapSz = [];
+                        dxCNN = [];
+                        localCnnUpdate = [];
+                        localRnnUpdate = [];
+
+                        % Create local cell arrays for the current worker's layers
+                        if ~isempty(obj.cnnModule)
+                            localCnnUpdate = zeros(obj.idxMap.cnnEnd(end),1);
+                        end
+                        if ~isempty(obj.rnnModule)
+                            localRnnUpdate = zeros(obj.idxMap.rnn{end}(end,2),1);
+                        end
+                        localFcUpdate  = zeros(obj.idxMap.fcEnd(end), 1);
         
-                        % reset hiddenstates and stored activations in the RNN and FC layers
+                        % reset hidden states and stored activations in the RNN and FC layers
                         obj.resetMemory();
         
                         tr       = batchInfo(segmIdx,1);
@@ -324,13 +402,13 @@ classdef TemporalNeuralNet < handle
         
                         % CNN forward pass
                         for i = 1:numConvLayers
-                            trainingSegment = obj.CNNmodule{i}.forward(trainingSegment, 'train');
+                            trainingSegment = obj.cnnModule{i}.forward(trainingSegment, 'train');
                         end
         
                         outputLength = floor(size(trainingSegment,1)/obj.tPool);
                         output       = zeros(outputLength, obj.numClasses);
         
-                        % Forward pass though RNN and FC
+                        % Forward pass through RNN and FC
                         for scanningIdx = 1:outputLength
                             startIdx   = (scanningIdx-1)*obj.tPool+1;
                             endIdx     = startIdx + obj.tPool-1;
@@ -338,12 +416,12 @@ classdef TemporalNeuralNet < handle
         
                             % RNN
                             for i = 1:numRecLayers
-                                inputSlice = obj.RNNmodule{i}.forward(inputSlice, 'train');
+                                inputSlice = obj.rnnModule{i}.forward(inputSlice, outputLength, scanningIdx, 'train');
                             end
                             
                             % FC
-                            if ~isempty(obj.FCmodule)
-                                inputSlice = obj.FCmodule.forward(inputSlice, 'train');
+                            if ~isempty(obj.fcModule)
+                                inputSlice = obj.fcModule.forward(inputSlice, outputLength, scanningIdx, 'train');
                             end
         
                             % Softmax
@@ -351,17 +429,17 @@ classdef TemporalNeuralNet < handle
                         end
         
                         % Storage for backpropagated error at the CNN output
-                        if ~isempty(obj.CNNmodule)
-                            convIdx = find(cellfun(@(L) isa(L,'ConvolutionalLayer'), obj.CNNmodule), 1, 'last');
-                            mapSz   = size(obj.CNNmodule{convIdx}.preacts);  % [T_down x featDim1 x featDim2]
+                        if ~isempty(obj.cnnModule)
+                            convIdx = find(cellfun(@(L) isa(L,'ConvolutionalLayer'), obj.cnnModule), 1, 'last');
+                            mapSz   = size(obj.cnnModule{convIdx}.preacts);  % [T_down x featDim1 x featDim2]
                             dxCNN   = zeros([outputLength*obj.tPool, mapSz(2:end)]);
                         end
                             
                         % Backward pass from softmax through FC, RNN, CNN
                         for scanningIdx = outputLength:-1:1
                             % Compute average ground-truth over window
-                            startIdx = (scanningIdx-1)*(obj.CNNstepSize*obj.tPool)+1;
-                            endIdx   = min(startIdx+obj.CNNstepSize*(obj.tPool-1)+obj.CNNwindowSize-1,size(labels,1));
+                            startIdx = (scanningIdx-1)*(obj.cnnStepSize*obj.tPool)+1;
+                            endIdx   = min(startIdx+obj.cnnStepSize*(obj.tPool-1)+obj.cnnWindowSize-1,size(labels,1));
                             avgLabel = sum(labels(startIdx:endIdx,:))/(endIdx-startIdx+1);
         
                             % Update correct counter for learning metrics
@@ -381,50 +459,110 @@ classdef TemporalNeuralNet < handle
                             totalEntropy_batch = totalEntropy_batch + ResSum;
         
                             % Backprop through FC
-                            if ~isempty(obj.FCmodule)
-                                dx = obj.FCmodule.backprop(dx, scanningIdx);
+                            if ~isempty(obj.fcModule)
+                                [dx, localFcUpdate] = obj.fcModule.backprop(dx, scanningIdx, obj.idxMap);
                             end
 
                             % Backprop through RNN
                             for i = numRecLayers:-1:1
-                                dx = obj.RNNmodule{i}.backprop(dx, scanningIdx);
+                                [dx, weightUpdate, biasUpdate] = obj.rnnModule{i}.backprop(dx, scanningIdx);
+                                rnnLayerUpdate = zeros(obj.idxMap.rnn{i}(end,2),1);
+                                for j = 1:numel(weightUpdate)
+                                    strtIdx = obj.idxMap.rnn{i}(j,1);
+                                    endIdx  = obj.idxMap.rnn{i}(j,2);
+                                    rnnLayerUpdate(strtIdx:endIdx) = [weightUpdate{j}(:); biasUpdate{j}(:)];
+                                end
+                                % rnnLayerUpdate = [weightUpdate(:); biasUpdate(:)];
+                                strtIdx = obj.idxMap.rnn{i}(1,  1);
+                                endIdx  = obj.idxMap.rnn{i}(end,2);
+                                localRnnUpdate(strtIdx:endIdx) = rnnLayerUpdate(strtIdx:endIdx);
                             end
         
                             % Reshape and accumulate CNN error      
-                            if ~isempty(obj.CNNmodule)
+                            if ~isempty(obj.cnnModule)
                                 dx     = reshape(dx, [obj.tPool, mapSz(2:end)]);
                                 startT = (scanningIdx-1)*obj.tPool + 1;
                                 endT   = startT + obj.tPool - 1;
                                 dxCNN(startT:endT, :, :) = dx;
                             end
+                            
+                            if ~isempty(obj.rnnModule)
+                                rnnBatchUpdate = rnnBatchUpdate + localRnnUpdate;
+                            end
+                            fcBatchUpdate  = fcBatchUpdate  + localFcUpdate;
                         end
-        
-                        % Backprop through CNN
+
+                        convLayerIdx = numel(obj.idxMap.cnnEnd);
+
                         for i = numConvLayers:-1:1
-                            dxCNN = obj.CNNmodule{i}.backprop(dxCNN);
+                            [dxCNN, weightUpdate, biasUpdate] = obj.cnnModule{i}.backprop(dxCNN);
+                            if isa(obj.cnnModule{i}, "ConvolutionalLayer")
+                                CNNLayerUpdate = [weightUpdate(:); biasUpdate(:)];
+                                strtIdx = obj.idxMap.cnnStrt(convLayerIdx);
+                                endIdx  = obj.idxMap.cnnEnd(convLayerIdx);
+                                localCnnUpdate(strtIdx:endIdx) = CNNLayerUpdate;
+                                convLayerIdx = convLayerIdx - 1;
+                            end
                         end
-        
-                        totalSamples_batch = totalSamples_batch + outputLength;
+                        
+                        if ~isempty(obj.cnnModule)
+                            cnnBatchUpdate = cnnBatchUpdate + localCnnUpdate;
+                        end
+                        totalSamples_batch = totalSamples_batch + outputLength; 
                     end
+
+                    % Reshape the gradient vectors and update the main object serially
+                    convLayerIdx = 0;
+                    for i = 1:numConvLayers
+                        if isa(obj.cnnModule{i}, "ConvolutionalLayer")
+                            convLayerIdx = convLayerIdx + 1;
+                            strtIdx      = obj.idxMap.cnnStrt(convLayerIdx);
+                            endIdx       = obj.idxMap.cnnEnd(convLayerIdx);
+                            numBiases    = numel(obj.cnnModule{i}.biases);
+                            obj.cnnModule{i}.dW = reshape(cnnBatchUpdate(strtIdx:endIdx-numBiases),  size(obj.cnnModule{i}.dW));
+                            obj.cnnModule{i}.db = reshape(cnnBatchUpdate(endIdx-numBiases+1:endIdx), size(obj.cnnModule{i}.db));
+                        end
+                    end
+
+                    for i = 1:numRecLayers
+                        for j = 1:numel(obj.rnnModule{i}.weights)
+                            strtIdx   = obj.idxMap.rnn{i}(j,1);
+                            endIdx    = obj.idxMap.rnn{i}(j,2);
+                            numBiases = numel(obj.rnnModule{i}.biases{j});
+                            obj.rnnModule{i}.dW{j} = reshape(rnnBatchUpdate(strtIdx:endIdx-numBiases),  size(obj.rnnModule{i}.dW{j}));
+                            obj.rnnModule{i}.db{j} = reshape(rnnBatchUpdate(endIdx-numBiases+1:endIdx), size(obj.rnnModule{i}.db{j}));
+                        end
+                    end
+
+					if ~isempty(obj.fcModule)
+					    for i = 1:numel(obj.fcModule.sizes)-1
+						    strtIdx   = obj.idxMap.fcStrt(i);
+                            endIdx    = obj.idxMap.fcEnd(i);
+                            numBiases = numel(obj.fcModule.biases{i});
+                            obj.fcModule.dW{i} = reshape(fcBatchUpdate(strtIdx:endIdx-numBiases),  size(obj.fcModule.dW{i}));
+                            obj.fcModule.db{i} = reshape(fcBatchUpdate(endIdx-numBiases+1:endIdx), size(obj.fcModule.db{i}));
+                        end
+                    end
+                    
         
                     % Adam parameter update
                     adamOptimizer(obj, totalSamples_batch);
                     obj.t = obj.t + 1;
         
                     % Record batch metrics
-                    obj.totalEntropy_vec     = [obj.totalEntropy_vec;     totalEntropy_batch/totalSamples_batch];
-                    obj.trainingaccuracy_vec = [obj.trainingaccuracy_vec; correctCount_batch/totalSamples_batch];
+                    obj.totalEntropyHistory     = [obj.totalEntropyHistory;     totalEntropy_batch/totalSamples_batch];
+                    obj.trainingAccuracyHistory = [obj.trainingAccuracyHistory; correctCount_batch/totalSamples_batch];
         
                     % Plot progress
                     subplot(2,1,1); cla;
-                    plot(obj.totalEntropy_vec);
-                    grid on; %axis padded;
+                    plot(obj.totalEntropyHistory);
+                    grid on; % axis padded;
                     title('Training loss (avg cross-entropy)');
                     xlabel('Batch'); ylabel('Loss');
 
                     subplot(2,1,2); cla;
-                    plot(obj.trainingaccuracy_vec);
-                    grid on; %axis padded;
+                    plot(obj.trainingAccuracyHistory);
+                    grid on; % axis padded;
                     title('Training accuracy');
                     xlabel('Batch'); ylabel('Accuracy');
 
@@ -437,37 +575,36 @@ classdef TemporalNeuralNet < handle
                 end
         
                 elapsedTime = toc;
-                fprintf('Epoch %d complete\n', epochIdx);
+                fprintf('Epoch %d completed in %.0f s.\n', size(obj.learningHistory,1), elapsedTime);
         
                 % Update learningHistory log
                 trainingAccuracy = correctCount_epoch/totalSamples_epoch;
                 residual         = totalEntropy_epoch/totalSamples_epoch;
-                testAcc          = evaluate(obj, testData);
+                testAcc          = evaluate(obj, validationData);
                 avgSegmLen       = totalSamples_epoch/size(segmInfos,1);
                 obj.learningHistory(end+1,:) = [batchSize, avgSegmLen, obj.eta, testAcc, trainingAccuracy, residual, elapsedTime];
-                
+                fprintf('Validation accuracy: %.4f\n', testAcc);
                 % Learning rate decay
                 obj.eta = obj.learningRateDecay*obj.eta;
         
                 % Save trained network
-                timestamp = datestr(now, 'yyyy-mm-dd_HH-MM-SS');
+                timestamp = datetime('now', 'Format','yyyy-MM-dd_HH-mm-SS');
                 filename  = sprintf('Network_trained_%s.mat', timestamp);
                 save(filename, 'obj');
-        
             end
         end
 
         %% Evaluate: Compute overall classification accuracy on test set
         function acc = evaluate(obj, testData)
             % Inputs: 
-            %   obj         - TemporalNeuralNet instance
-            %   testData    - N×2 cell array, each row: {rawSequence, oneHotLabels}
+            %   obj            - TemporalNeuralNet instance
+            %   testData - N×2 cell array, each row: {rawSequence, oneHotLabels}
             % Output:
-            %   acc         - fraction of correctly predicted time‐segments
+            %   acc            - fraction of correctly predicted time‐segments
 
             % Initialize counters
             correctCount = 0;
-            totalFrames  = 0;
+            totalSteps  = 0;
         
             % Loop through each item in the test data
             for i = 1:size(testData, 1)
@@ -476,7 +613,7 @@ classdef TemporalNeuralNet < handle
                 obj.resetMemory();         % clear any RNN/FC hidden state
         
                 % Forward-pass through full network
-                outputActivations = forward(obj, input);
+                outputActivations = obj.forward(input);
         
                 % Determine the predicted class
                 [~, predictedClasses] = max(outputActivations,[],2);
@@ -485,8 +622,15 @@ classdef TemporalNeuralNet < handle
                 % For each segment, derive the “true” class at the segment midpoint
                 for j = 1:outputLength
                     % Compute raw‐data window corresponding to segment t
-                    startIdx = (j-1)*(obj.CNNstepSize*obj.tPool)+1;
-                    endIdx   = min(startIdx+obj.CNNstepSize*(obj.tPool-1)+obj.CNNwindowSize-1,size(labels,1));
+                    if isempty(obj.rnnModule)
+                        stepSize = obj.timeStep;
+                    else
+                        stepSize = obj.tPool;
+                    end
+
+                    startIdx = (j-1)*(obj.cnnStepSize*stepSize)+1;
+                    endIdx   = min(startIdx+obj.cnnStepSize*(obj.tPool-1)+obj.cnnWindowSize-1,size(labels,1));
+                    % During evaluation, segment labels are assigned using the midpoint timestep
                     midpoint = floor((startIdx + endIdx)/2);
 
                     % True class at midpoint
@@ -499,28 +643,34 @@ classdef TemporalNeuralNet < handle
                 end
         
                 % Accumulate count of evaluated segments
-                totalFrames = totalFrames + outputLength;
+                totalSteps = totalSteps + outputLength;
                 
             end
         
             % Overall success rate
-            acc = correctCount/totalFrames;
-        
+            if totalSteps == 0
+                warning('No evaluable frames found.');
+                acc = NaN;
+            else
+                acc = correctCount/totalSteps;
+            end
         end
 
         %% adamOptimizer: caller function of 'applyAdam' in each layer 
         function adamOptimizer(obj, totalSamples_batch)
-            % ADAMOPTIMIZER: Adam updates across all modules
+            % Apply Adam parameter updates to all trainable modules
             % totalSamples_batch: normalizing factor (batch size)
 
-            for L = obj.CNNmodule
-                L{1}.applyAdam(obj.eta, obj.beta_1, obj.beta_2, totalSamples_batch, obj.t, obj.epsilon);
+            for L = obj.cnnModule
+                if isa(L, "ConvolutionalLayer")
+                    L{1}.applyAdam(obj.eta, obj.beta_1, obj.beta_2, totalSamples_batch, obj.t, obj.epsilon);
+                end
             end
-            for U = obj.RNNmodule
+            for U = obj.rnnModule
                 U{1}.applyAdam(obj.eta, obj.beta_1, obj.beta_2, totalSamples_batch, obj.t, obj.epsilon);
             end
-            if ~isempty(obj.FCmodule)
-                obj.FCmodule.applyAdam(obj.eta, obj.beta_1, obj.beta_2, totalSamples_batch, obj.t, obj.epsilon);
+            if ~isempty(obj.fcModule)
+                obj.fcModule.applyAdam(obj.eta, obj.beta_1, obj.beta_2, totalSamples_batch, obj.t, obj.epsilon);
             end
         end
 
@@ -562,7 +712,7 @@ classdef TemporalNeuralNet < handle
                 trialIdx   = [];
                 startIdx   = [];
                 endIdx     = [];
-                windowSize = (obj.CNNwindowSize+(obj.tPool-1)*obj.CNNstepSize);
+                windowSize = (obj.cnnWindowSize+(obj.tPool-1)*obj.cnnStepSize);
                 shift      = 2;
 
                 for i = 1:numTrials
@@ -572,7 +722,6 @@ classdef TemporalNeuralNet < handle
                     trialIdx(end+1:end+numWindows,1) = ones(numWindows,1)*i;
                     startIdx(end+1:end+numWindows,1) = [0:numWindows-1]*shift+1;
                     endIdx(end+1:end+numWindows,1)   = [0:numWindows-1]*shift+windowSize;
-                    
                 end
             end
 
@@ -583,32 +732,32 @@ classdef TemporalNeuralNet < handle
         %% resetMemory: clear stored activations and hidden states before each new sequence
         function resetMemory(obj)
             % Reset CNN activations
-            for i = 1:numel(obj.CNNmodule)
-                obj.CNNmodule{i}.resetStoredActivations();
+            for i = 1:numel(obj.cnnModule)
+                obj.cnnModule{i}.resetStoredActivations();
             end
             % Reset each RNN unit's hidden state history
-            for i = 1:numel(obj.RNNmodule)
-                obj.RNNmodule{i}.resetMemory();
+            for i = 1:numel(obj.rnnModule)
+                obj.rnnModule{i}.resetMemory();
             end
             % Reset FC module if present (clears any stored activations)
-            if ~isempty(obj.FCmodule)
-                obj.FCmodule.resetStoredActivations();
+            if ~isempty(obj.fcModule)
+                obj.fcModule.resetStoredActivations();
             end
         end
 
         %% resetGrads: zero out gradient accumulators before each batch
         function resetGrads(obj)
             % Reset CNN gradient buffers
-            for i = 1:numel(obj.CNNmodule)/2 % build check fot layer type
-                obj.CNNmodule{(i-1)*2+1}.resetGrads();
+            for i = 1:numel(obj.cnnModule)/2 % build check fot layer type
+                obj.cnnModule{(i-1)*2+1}.resetGrads();
             end
             % Reset RNN gradient accumulators
-            for i = 1:numel(obj.RNNmodule)
-                obj.RNNmodule{i}.resetGrads();
+            for i = 1:numel(obj.rnnModule)
+                obj.rnnModule{i}.resetGrads();
             end
             % Reset FC gradients if module exists
-            if ~isempty(obj.FCmodule)
-                obj.FCmodule.resetGrads();
+            if ~isempty(obj.fcModule)
+                obj.fcModule.resetGrads();
             end
         end
 
@@ -634,5 +783,4 @@ function labelWeights = countTrainingLabels(trainingData, numClasses)
     labelFreqs(labelFreqs == 0) = 1;       % replace zeros with 1
     
     labelWeights = labelFreqs*numClasses;
-
 end

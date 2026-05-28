@@ -3,8 +3,6 @@ classdef PoolingLayer < handle
     % Reduces time dimension by poolingRatio, retains channel and kernel dims
     properties
         poolingRatio
-        weights
-        biases
         acts
     end
     
@@ -14,8 +12,6 @@ classdef PoolingLayer < handle
         function obj = PoolingLayer(poolingRatio)
             % Set pooling factor, initialize dummy params
             obj.poolingRatio = poolingRatio; % downsampling factor along time axis
-            obj.weights      = 1;            % dummy for Adam compatibility (unused)
-            obj.biases       = 0;            % dummy for Adam compatibility (unused)
             obj.acts         = [];           % stores last input for backprop
         end
         
@@ -26,19 +22,18 @@ classdef PoolingLayer < handle
             doCache = ~isempty(varargin) && strcmp(varargin{1}, 'train');
 
             % Compute output size after pooling
-            outputLength = floor((size(input,1)/obj.poolingRatio));
+            outputLength = floor(size(input,1)/obj.poolingRatio);
             sizes        = size(input);
             sizes(1)     = outputLength;
             as           = zeros(sizes);
-            zs           = zeros(sizes);
 
             % Slide window and take max across time slice
             for i = 1:outputLength
                 startIdx   = (i-1)*obj.poolingRatio+1;
                 endIdx     = i*obj.poolingRatio;
                 inputSlice = input(startIdx:endIdx, :, :);
-                as(i,:,:)  = squeeze(max(inputSlice, [], 1));
-                zs(i,:,:)  = squeeze(max(inputSlice, [], 1));
+                % as(i,:,:)  = squeeze(max(inputSlice, [], 1));
+                as(i,:,:)  = max(inputSlice, [], 1);
             end
 
             % Store activations and preactivations for backprop
@@ -48,7 +43,7 @@ classdef PoolingLayer < handle
         end
 
         %% Backprop: route gradients only to max positions
-        function d_input = backprop(obj, d_output)
+        function [d_input, dW_new, db_new] = backprop(obj, d_output)
 
             % Prepare input gradient buffer
             d_input            = zeros(size(obj.acts));
@@ -69,18 +64,15 @@ classdef PoolingLayer < handle
 
             % Assign gradients only at max locations
             d_input(argmaxMask) = d_output_augmented(argmaxMask);
-        end
-
-        %% ApplyAdam: only for consistency
-        function applyAdam(obj, varargin)
-            obj.weights = obj.weights;
-            obj.biases  = obj.biases;
+            
+            % Dummies for compatibility
+            dW_new = [];
+            db_new = [];
         end
 
         %% ResetStoredActivations: clear cached input
         function resetStoredActivations(obj)
-            obj.acts         = [];
+            obj.acts = [];
         end
-
     end
 end
