@@ -357,33 +357,40 @@ classdef TemporalNeuralNet < handle
                     totalSamples_batch = 0;
         
                     % List of segments in the batch
-                    rows           = randIdxList((b-1)*batchSize+1:min(b*batchSize,numel(randIdxList)));
-                    trialIdxs      = segmInfos(rows, 1);
-                    startIdxs      = segmInfos(rows, 2);
-                    endIdxs        = segmInfos(rows, 3);
+                    rows             = randIdxList((b-1)*batchSize+1:min(b*batchSize,numel(randIdxList)));
+                    trialIdxs        = segmInfos(rows, 1);
+                    startIdxs        = segmInfos(rows, 2);
+                    endIdxs          = segmInfos(rows, 3);
 
                     % Preallocate arrays to store gradient updates for each parallel worker separately
-                    cnnUpdateSize  = obj.idxMap.cnnStrt(end)-1;
-                    fcUpdateSize   = obj.idxMap.fcStrt(end)-1;
+                    cnnUpdateSize    = obj.idxMap.cnnStrt(end)-1;
+                    fcUpdateSize     = obj.idxMap.fcStrt(end)-1;
 
-                    cnnBatchUpdate = zeros(cnnUpdateSize,1);
-                    fcBatchUpdate  = zeros(fcUpdateSize, 1);
-                    rnnBatchUpdate = zeros(obj.idxMap.rnn{end}(end,2),1);
+                    cnnBatchUpdate   = zeros(cnnUpdateSize,1);
+                    fcBatchUpdate    = zeros(fcUpdateSize, 1);
+                    rnnBatchUpdate   = zeros(obj.idxMap.rnn{end}(end,2),1);
+
+                    batchData        = cell(numel(rows),1);
+                    batchLbls        = cell(numel(rows),1);
+
+                    for i = 1:numel(rows)
+                        trialIdx     = trialIdxs(i);
+                        startIdx     = startIdxs(i);
+                        endIdx       = endIdxs(i);
+                        batchData{i} = trainingData{trialIdx,1}(startIdx:endIdx,:);
+                        batchLbls{i} = trainingData{trialIdx,2}(startIdx:endIdx,:);
+                    end
                                         
                     % Go through the segments
                     parfor segmIdx = 1:size(trialIdxs,1)
         
                         % Reset hidden states and stored activations in the RNN and FC layers
                         obj.resetMemory();
-        
-                        trialIdx           = trialIdxs(segmIdx);
-                        startIdx           = startIdxs(segmIdx);
-                        endIdx             = endIdxs(segmIdx);
-                        trainSegm          = trainingData{trialIdx,1}(startIdx:endIdx,:);
-                        labels             = trainingData{trialIdx,2}(startIdx:endIdx,:);
+                        trainSegment       = batchData{segmIdx};
+                        labels             = batchLbls{segmIdx};
         
                         % Forward pass with activation and preactivation storage enabled
-                        output             = obj.forward(trainSegm, 'isTraining',true);
+                        output             = obj.forward(trainSegment, 'isTraining',true);
                             
                         % Backward pass from softmax through FC, RNN, CNN
                         [cnnSeqUpdate, rnnSeqUpdate, fcSeqUpdate, correctCount, totalEntropy, totalSamples] = obj.backwardPass(output, labels, labelWeights);
