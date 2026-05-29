@@ -368,7 +368,7 @@ classdef TemporalNeuralNet < handle
                     rnnBatchUpdate = zeros(obj.idxMap.rnn{end}(end,2),1);
                                         
                     % Go through the segments
-                    for segmIdx = 1:size(trialIdxs,1)
+                    parfor segmIdx = 1:size(trialIdxs,1)
                         
                         % Initialize temporary variables to suppress warnings
                         mapSz = [];
