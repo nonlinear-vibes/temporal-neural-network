@@ -4,7 +4,7 @@ classdef TemporalNeuralNet < handle
     % A modular deep learning model for multivariate time series with dense sequence 
     % labeling, where each timestep has an associated one-hot target vector.
     % The pipeline is:
-    %   1) 1-D temporal CNN module (Conv / Pool layers) for feature extraction
+    %   1) 1D temporal CNN module (Conv / Pool layers) for feature extraction
     %   2) Recurrent module (vanilla RNN, GRU, or LSTM) for temporal modelling
     %   3) Fully-connected classifier for final predictions
     %   All modules are optional, but the order CNN->RNN->FC is fixed.
@@ -230,9 +230,11 @@ classdef TemporalNeuralNet < handle
                         numParams = numel(layer.weights{j}) + numel(layer.biases{j});
                         endIdx    = endIdx + numParams;
                         obj.idxMap.rnn{i} = [obj.idxMap.rnn{i}; [strtIdx, endIdx]];
-                        strtIdx = strtIdx + numParams;
+                        strtIdx   = strtIdx + numParams;
                     end
                 end
+            else
+                obj.idxMap.rnn{1} = [0, 0];
             end
 
             if ~isempty(obj.fcModule)
@@ -352,53 +354,40 @@ classdef TemporalNeuralNet < handle
                     totalSamples_batch = 0;
         
                     % List of segments in the batch
-                    rows      = randIdxList((b-1)*batchSize+1:min(b*batchSize,numel(randIdxList)));
-                    batchInfo = segmInfos(rows, :);
+                    rows           = randIdxList((b-1)*batchSize+1:min(b*batchSize,numel(randIdxList)));
+                    trialIdxs      = segmInfos(rows, 1);
+                    startIdxs      = segmInfos(rows, 2);
+                    endIdxs        = segmInfos(rows, 3);
 
                     % Preallocate arrays to store gradient updates for each parallel worker separately
-                    cnnUpdateSize = 0;
-                    if ~isempty(obj.idxMap.cnnEnd)
-                        cnnUpdateSize = obj.idxMap.cnnEnd(end);
-                    end
-
-                    fcUpdateSize = 0;
-                    if ~isempty(obj.idxMap.fcEnd)
-                        fcUpdateSize = obj.idxMap.fcEnd(end);
-                    end
+                    cnnUpdateSize  = obj.idxMap.cnnStrt(end)-1;
+                    fcUpdateSize   = obj.idxMap.fcStrt(end)-1;
 
                     cnnBatchUpdate = zeros(cnnUpdateSize,1);
                     fcBatchUpdate  = zeros(fcUpdateSize, 1);
-                    if ~isempty(obj.rnnModule)
-                        rnnBatchUpdate = zeros(obj.idxMap.rnn{end}(end,2),1);
-                    end
+                    rnnBatchUpdate = zeros(obj.idxMap.rnn{end}(end,2),1);
                                         
                     % Go through the segments
-                    parfor segmIdx = 1:size(batchInfo,1)
+                    for segmIdx = 1:size(trialIdxs,1)
                         
                         % Initialize temporary variables to suppress warnings
                         mapSz = [];
                         dxCNN = [];
-                        localCnnUpdate = [];
-                        localRnnUpdate = [];
 
                         % Create local cell arrays for the current worker's layers
-                        if ~isempty(obj.cnnModule)
-                            localCnnUpdate = zeros(obj.idxMap.cnnEnd(end),1);
-                        end
-                        if ~isempty(obj.rnnModule)
-                            localRnnUpdate = zeros(obj.idxMap.rnn{end}(end,2),1);
-                        end
+                        localCnnUpdate = zeros(obj.idxMap.cnnStrt(end)-1,1);
+                        localRnnUpdate = zeros(obj.idxMap.rnn{end}(end,2),1);
                         localFcUpdate  = zeros(obj.idxMap.fcEnd(end), 1);
         
                         % reset hidden states and stored activations in the RNN and FC layers
                         obj.resetMemory();
         
-                        tr       = batchInfo(segmIdx,1);
-                        startIdx = batchInfo(segmIdx,2);
-                        endIdx   = batchInfo(segmIdx,3);
+                        trialIdx = trialIdxs(segmIdx);
+                        startIdx = startIdxs(segmIdx);
+                        endIdx   = endIdxs(segmIdx);
         
-                        trainingSegment = trainingData{tr,1}(startIdx:endIdx,:);
-                        labels          = trainingData{tr,2}(startIdx:endIdx,:);
+                        trainingSegment = trainingData{trialIdx,1}(startIdx:endIdx,:);
+                        labels          = trainingData{trialIdx,2}(startIdx:endIdx,:);
         
                         % CNN forward pass
                         for i = 1:numConvLayers
@@ -431,7 +420,7 @@ classdef TemporalNeuralNet < handle
                         % Storage for backpropagated error at the CNN output
                         if ~isempty(obj.cnnModule)
                             convIdx = find(cellfun(@(L) isa(L,'ConvolutionalLayer'), obj.cnnModule), 1, 'last');
-                            mapSz   = size(obj.cnnModule{convIdx}.preacts);  % [T_down x featDim1 x featDim2]
+                            mapSz   = size(obj.cnnModule{convIdx}.preactCache);  % [T_down x featDim1 x featDim2]
                             dxCNN   = zeros([outputLength*obj.tPool, mapSz(2:end)]);
                         end
                             
@@ -534,16 +523,13 @@ classdef TemporalNeuralNet < handle
                         end
                     end
 
-					if ~isempty(obj.fcModule)
-					    for i = 1:numel(obj.fcModule.sizes)-1
-						    strtIdx   = obj.idxMap.fcStrt(i);
-                            endIdx    = obj.idxMap.fcEnd(i);
-                            numBiases = numel(obj.fcModule.biases{i});
-                            obj.fcModule.dW{i} = reshape(fcBatchUpdate(strtIdx:endIdx-numBiases),  size(obj.fcModule.dW{i}));
-                            obj.fcModule.db{i} = reshape(fcBatchUpdate(endIdx-numBiases+1:endIdx), size(obj.fcModule.db{i}));
-                        end
-                    end
-                    
+				    for i = 1:numel(obj.fcModule.sizes)-1
+					    strtIdx   = obj.idxMap.fcStrt(i);
+                        endIdx    = obj.idxMap.fcEnd(i);
+                        numBiases = numel(obj.fcModule.biases{i});
+                        obj.fcModule.dW{i} = reshape(fcBatchUpdate(strtIdx:endIdx-numBiases),  size(obj.fcModule.dW{i}));
+                        obj.fcModule.db{i} = reshape(fcBatchUpdate(endIdx-numBiases+1:endIdx), size(obj.fcModule.db{i}));
+                    end                    
         
                     % Adam parameter update
                     adamOptimizer(obj, totalSamples_batch);
@@ -724,7 +710,6 @@ classdef TemporalNeuralNet < handle
                     endIdx(end+1:end+numWindows,1)   = [0:numWindows-1]*shift+windowSize;
                 end
             end
-
             % Combine into final M×3 matrix
             segmInfos = [trialIdx, startIdx, endIdx];
         end

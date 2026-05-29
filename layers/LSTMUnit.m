@@ -10,8 +10,8 @@ classdef LSTMUnit < handle
         cLong
         dLdh
         dLdc
-        acts
-        input
+        actCache
+        preactCache
         dW, db
         vdw, sdw
         vdb, sdb
@@ -30,61 +30,65 @@ classdef LSTMUnit < handle
             obj.biases  = {-mean(obj.weights{1},2)};
 
             % Initialize hidden state
-            obj.hShort = zeros(outSize, 1);
-            obj.cLong  = zeros(outSize, 1);
+            obj.hShort  = zeros(outSize, 1);
+            obj.cLong   = zeros(outSize, 1);
             
             % accumulated backprop gradient dE/dh for previous time step
-            obj.dLdh = zeros(4*outSize, 1);
-            obj.dLdc = zeros(outSize, 1);
-
-            % Initialize caches and gradients
-            obj.acts  = [];
-            obj.input = [];
+            obj.dLdh    = zeros(4*outSize, 1);
+            obj.dLdc    = zeros(outSize, 1);
 
             % Initialize Adam moment buffers
-            obj.vdw = {zeros(size(obj.weights{1}))};
-            obj.sdw = {zeros(size(obj.weights{1}))};
-            obj.dW  = {zeros(size(obj.weights{1}))};
-            obj.vdb = {zeros(size(obj.biases{1}))};
-            obj.sdb = {zeros(size(obj.biases{1}))};
-            obj.db  = {zeros(size(obj.biases{1}))};
+            obj.vdw     = {zeros(size(obj.weights{1}))};
+            obj.sdw     = {zeros(size(obj.weights{1}))};
+            obj.dW      = {zeros(size(obj.weights{1}))};
+            obj.vdb     = {zeros(size(obj.biases{1}))};
+            obj.sdb     = {zeros(size(obj.biases{1}))};
+            obj.db      = {zeros(size(obj.biases{1}))};
+
+            % Initialize caches and gradients
+            obj.actCache    = [];
+            obj.preactCache = [];
         end
 
         %% Forward: single time-step. Optionally cache history if 'train' flag
         function a_out = forward(obj, x_in, numSteps, t, varargin)
-            % x_in  - input data, row vector [1×inputSize]
-            % a_out - output data, row vector [1×outputSize]
+            % Inputs:
+            %   x_in     - backpropagated error from the next layer, [1 × inSize] 
+            %   numSteps - length of the training sequence
+            %   t        - time index of the cached activations
+            % Outputs:
+            %   a_out    - backpropagated error to the previous layer, [1 × outSize]
 
             doCache = ~isempty(varargin) && strcmp(varargin{1}, 'train');
 
             % columnize input for matrix ops
-            x_in   = x_in';
-            c_prev = obj.cLong(:,t);
-            h_prev = obj.hShort(:,t);
+            x_in    = x_in';
+            c_prev  = obj.cLong(:,t);
+            h_prev  = obj.hShort(:,t);
             
             preacts = obj.weights{1} * [x_in; h_prev] + obj.biases{1};
-            as      = sigm(preacts(1:3*obj.outSize));
+            a_out   = sigm(preacts(1:3*obj.outSize));
             c_tilde = tanh(preacts(3*obj.outSize+1:end));
 
-            c = as(1:obj.outSize) .* c_prev + as(obj.outSize+1:2*obj.outSize) .* c_tilde;
-            h = as(2*obj.outSize+1:end) .* tanh(c);
+            c       = a_out(1:obj.outSize) .* c_prev + a_out(obj.outSize+1:2*obj.outSize) .* c_tilde;
+            h       = a_out(2*obj.outSize+1:end) .* tanh(c);
 
             % convert back to row form
             a_out = h';
 
             if doCache
-                if isempty(obj.acts)
+                if isempty(obj.actCache)
                     % initialize activation and hidden state cache
-                    obj.hShort = zeros(length(h),numSteps+1);
-                    obj.cLong  = zeros(length(c),numSteps+1);
-                    obj.acts   = zeros(length(as)+length(c_tilde),numSteps);
-                    obj.input  = zeros(length(x_in),numSteps);
+                    obj.hShort      = zeros(length(h),numSteps+1);
+                    obj.cLong       = zeros(length(c),numSteps+1);
+                    obj.actCache    = zeros(length(a_out)+length(c_tilde),numSteps);
+                    obj.preactCache = zeros(length(x_in),numSteps);
                 end
                 % append to history for BPTT...
-                obj.hShort(:,t+1) = h;
-                obj.cLong(:,t+1)  = c;
-                obj.acts(:,t)     = [as; c_tilde];
-                obj.input(:,t)    = x_in;
+                obj.hShort(:,t+1)    = h;
+                obj.cLong(:,t+1)     = c;
+                obj.actCache(:,t)    = [a_out; c_tilde];
+                obj.preactCache(:,t) = x_in;
             else
                 % or keep only the last state for inference
                 obj.hShort = h;
@@ -93,43 +97,47 @@ classdef LSTMUnit < handle
         end
 
         %% Backprop: one-step BPTT update
-        function [d_in, dW_update, db_update] = backprop(obj, d_out, t_idx)
-            % d_out - gradient from next layer, row [1×outputSize] 
-            % t_idx - time index to reference the stored history
-            % d_in  - gradient to previous layer, row [1×inputSize] 
+        function [d_in, dW_new, db_new] = backprop(obj, d_out, t)
+            % Inputs:
+            %   d_out  - backpropagated error from the next layer, [1 × outSize]
+            %   t      - time index of the cached activations
+            % Outputs:
+            %   d_in   - backpropagated error to the previous layer, [1 × inSize]
+            %   dW_new - update vector of weights from timestep t
+            %   db_new - update vector of biases from timestep t
 
-            d_out  = d_out';
+            d_out     = d_out';
 
-            h_prev = obj.hShort(:,t_idx);
-            c_prev = obj.cLong(:,t_idx);
-            c_t    = obj.cLong(:,t_idx+1);
-            x_t    = obj.input(:,t_idx);
+            h_prev    = obj.hShort(:,t);
+            c_prev    = obj.cLong(:,t);
+            c_t       = obj.cLong(:,t+1);
+            x_t       = obj.preactCache(:,t);
 
-            f_t = obj.acts(1:obj.outSize,t_idx);
-            i_t = obj.acts(obj.outSize+1:2*obj.outSize,t_idx);
-            o_t = obj.acts(2*obj.outSize+1:3*obj.outSize,t_idx);
-            c_tilde_t =obj.acts(3*obj.outSize+1:end,t_idx);
+            f_t       = obj.actCache(1:obj.outSize,t);
+            i_t       = obj.actCache(obj.outSize+1:2*obj.outSize,t);
+            o_t       = obj.actCache(2*obj.outSize+1:3*obj.outSize,t);
+            c_tilde_t = obj.actCache(3*obj.outSize+1:end,t);
 
-            dLdh_tot = d_out + obj.weights{1}(:,obj.inSize+1:end)' * obj.dLdh;
-            delta    = dLdh_tot .* o_t .* (1 - tanh(c_t).^2) + obj.dLdc;
+            dLdh_tot  = d_out + obj.weights{1}(:,obj.inSize+1:end)' * obj.dLdh;
+            delta     = dLdh_tot .* o_t .* (1 - tanh(c_t).^2) + obj.dLdc;
 
-            delta_o = dLdh_tot .* tanh(c_t) .* o_t .* (1 - o_t);
-            delta_f = delta .* c_prev .* f_t .* (1 - f_t);
-            delta_i = delta .* c_tilde_t .* i_t .* (1 - i_t);
-            delta_c = delta .* f_t;
+            delta_o   = dLdh_tot .* tanh(c_t) .* o_t .* (1 - o_t);
+            delta_f   = delta .* c_prev .* f_t .* (1 - f_t);
+            delta_i   = delta .* c_tilde_t .* i_t .* (1 - i_t);
+            delta_c   = delta .* f_t;
 
-            dLdh_tot_c = d_out + obj.weights{1}(1:3*obj.outSize,obj.inSize+1:end)' * obj.dLdh(1:3*obj.outSize);
+            dLdh_tot_c   = d_out + obj.weights{1}(1:3*obj.outSize,obj.inSize+1:end)' * obj.dLdh(1:3*obj.outSize);
             delta_ctilde = (dLdh_tot_c .* o_t .* (1 - tanh(c_t).^2) + obj.dLdc) .* i_t .* (1 - c_tilde_t.^2);
         
-            dW_update = {[delta_f; delta_i; delta_o; delta_ctilde] * [x_t; h_prev]'};
-            db_update = {[delta_f; delta_i; delta_o; delta_ctilde]};        
+            dW_new    = {[delta_f; delta_i; delta_o; delta_ctilde] * [x_t; h_prev]'};
+            db_new    = {[delta_f; delta_i; delta_o; delta_ctilde]};        
         
             % Package errors for next step
-            obj.dLdh = [delta_f; delta_i; delta_o; delta_ctilde];  
-            obj.dLdc = delta_c;
+            obj.dLdh  = [delta_f; delta_i; delta_o; delta_ctilde];  
+            obj.dLdc  = delta_c;
 
-            d_in  = obj.weights{1}(:,1:obj.inSize)' * obj.dLdh;                       
-            d_in  = d_in';                                                  
+            d_in      = obj.weights{1}(:,1:obj.inSize)' * obj.dLdh;                       
+            d_in      = d_in';                                                  
         end
 
         %% ApplyAdam: update weights and biases with Adam
@@ -141,19 +149,19 @@ classdef LSTMUnit < handle
         %% Resets
         function resetMemory(obj)
             % Clear hidden-state history, BPTT gradient accumulator and stored activations
-            obj.hShort = zeros(obj.outSize,1);
-            obj.cLong  = zeros(obj.outSize,1);
-            obj.dLdh   = zeros(4*obj.outSize,1);
-            obj.dLdc   = zeros(obj.outSize,1);
+            obj.hShort   = zeros(obj.outSize,1);
+            obj.cLong    = zeros(obj.outSize,1);
+            obj.dLdh     = zeros(4*obj.outSize,1);
+            obj.dLdc     = zeros(obj.outSize,1);
 
-            obj.acts  = [];
-            obj.input = [];
+            obj.actCache    = [];
+            obj.preactCache = [];
         end
 
         function resetGrads(obj)
         % Zero accumulated gradients before new batch
-            obj.dW = {zeros(size(obj.weights{1}))};
-            obj.db = {zeros(size(obj.biases{1}))};
+            obj.dW       = {zeros(size(obj.weights{1}))};
+            obj.db       = {zeros(size(obj.biases{1}))};
         end
     end
 end

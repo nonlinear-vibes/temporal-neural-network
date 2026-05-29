@@ -7,8 +7,8 @@ classdef ConvolutionalLayer < handle
         kernelSize
         weights
         biases
-        acts
-        preacts
+        actCache
+        preactCache
         dW, db
         vdw, vdb
         sdw, sdb
@@ -54,21 +54,23 @@ classdef ConvolutionalLayer < handle
         end
         
         %% Forward: 1D convolutions over time
-        function as = forward(obj, input, varargin)
-            % input: [T×numChannels×inFeatures]
+        function a_out = forward(obj, x_in, varargin)
+            % Inputs:
+            %   x_in     - input data tensor [T × numChannels × inFeatures]
+            %   varargin - if 'train' is given, activations and preactivations are stored 
+            % Output:
+            %   a_out    - output activation tensor [numSteps × numChannels × outFeatures] 
 
             doCache  = ~isempty(varargin) && strcmp(varargin{1}, 'train');
-
-            numSteps = size(input,1) - obj.kernelSize + 1;
-
-            as = zeros(numSteps, obj.numChannels, obj.outFeatures);  % activations
-            zs = zeros(numSteps, obj.numChannels, obj.outFeatures);  % pre-activations
+            numSteps = size(x_in,1) - obj.kernelSize + 1;
+            a_out    = zeros(numSteps, obj.numChannels, obj.outFeatures);  % activations
+            zs       = zeros(numSteps, obj.numChannels, obj.outFeatures);  % pre-activations
 
             % Perform convolution
             for i = 1:numSteps
                 step_Index = 1 + (i-1);
                 for k = 1:obj.outFeatures
-                    dotproduct = input(step_Index:step_Index+obj.kernelSize-1,:,:) .* squeeze(obj.weights(:,:,k,:));
+                    dotproduct = x_in(step_Index:step_Index+obj.kernelSize-1,:,:) .* squeeze(obj.weights(:,:,k,:));
                     z = sum(dotproduct);
                     if length(size(z)) ~= 2
                         z = sum(z,4);
@@ -77,24 +79,29 @@ classdef ConvolutionalLayer < handle
                             z = sum(z);
                         end
                     end
-                    zs(i,:,k) = z + obj.biases(:,k)';
-                    as(i,:,k) = leakyReLU(zs(i,:,k),obj.a);
+                    zs(i,:,k)    = z + obj.biases(:,k)';
+                    a_out(i,:,k) = leakyReLU(zs(i,:,k),obj.a);
                 end
             end
 
             % Cache for backprop
             if doCache
-                obj.acts    = input;
-                obj.preacts = zs;
+                obj.actCache    = x_in;
+                obj.preactCache = zs;
             end
         end
 
         %% Backprop: propagate gradients into input and update gradients
-        function [d_input, dW_new, db_new] = backprop(obj, d_output)
-            % d_output: [T×numChannels×outFeatures]
+        function [d_in, dW_new, db_new] = backprop(obj, d_out)
+            % Inputs:
+            %   d_out  - backpropagated error at the output, [outputSteps × numChannels × outFeatures]
+            % Outputs:
+            %   d_in   - backpropagated error at the input,  [inputSteps × numChannels × inFeatures]
+            %   dW_new - update vector of weights for the whole sequence
+            %   db_new - update vector of biases for the whole sequence
 
-            d_input  = zeros(size(obj.acts));
-            numSteps = size(obj.acts,1)-obj.kernelSize+1;
+            d_in     = zeros(size(obj.actCache));
+            numSteps = size(obj.actCache,1)-obj.kernelSize+1;
 
             % accumulate new weight and bias grads
             dW_new   = zeros(size(obj.weights));
@@ -103,15 +110,15 @@ classdef ConvolutionalLayer < handle
             % Loop kernels and time for gradient computation
             for k = 1:obj.outFeatures
                 for j = 1:obj.kernelSize
-                    D = obj.acts(j:end-obj.kernelSize+j,:,:) .* leakyReLU_prime(obj.preacts(:,:,k),obj.a);
-                    dW_new(j,:,k,:) = squeeze(sum(D .* d_output(:,:,k),1));
+                    D = obj.actCache(j:end-obj.kernelSize+j,:,:) .* leakyReLU_prime(obj.preactCache(:,:,k),obj.a);
+                    dW_new(j,:,k,:) = squeeze(sum(D .* d_out(:,:,k),1));
                     if j == 1
                         for i = 1:numSteps
-                            d_input(i:i+obj.kernelSize-1,:,:) = d_input(i:i+obj.kernelSize-1,:,:) + squeeze(obj.weights(:,:,k,:)).*reshape(leakyReLU_prime(obj.preacts(i,:,k),obj.a).*d_output(i,:,k),[1,obj.numChannels,1]);
+                            d_in(i:i+obj.kernelSize-1,:,:) = d_in(i:i+obj.kernelSize-1,:,:) + squeeze(obj.weights(:,:,k,:)).*reshape(leakyReLU_prime(obj.preactCache(i,:,k),obj.a).*d_out(i,:,k),[1,obj.numChannels,1]);
                         end
                     end
                 end
-                db_new(:,k) = sum(d_output(:,:,k).*leakyReLU_prime(obj.preacts(:,:,k),obj.a))';
+                db_new(:,k) = sum(d_out(:,:,k).*leakyReLU_prime(obj.preactCache(:,:,k),obj.a))';
             end
         end
 
@@ -124,8 +131,8 @@ classdef ConvolutionalLayer < handle
         %% Resets
         function resetStoredActivations(obj)
             % Clear cached activations and pre-activations
-            obj.acts    = [];
-            obj.preacts = [];
+            obj.actCache    = [];
+            obj.preactCache = [];
         end
 
         function resetGrads(obj)

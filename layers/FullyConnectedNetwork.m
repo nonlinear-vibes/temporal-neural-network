@@ -7,8 +7,8 @@ classdef FullyConnectedNetwork < handle
         numParams
         biases
         weights
-        actsStored
-        preactsStored
+        actCache
+        preactCache
         dW
         db
         vdw
@@ -24,19 +24,19 @@ classdef FullyConnectedNetwork < handle
         %% FullyConnectedNetwork constructor: initialize weights, biases, and optimizer buffers
         function obj = FullyConnectedNetwork(sizes)
             % Constructor
-            obj.numLayers = numel(sizes)-1;
-            obj.sizes     = sizes;
+            obj.numLayers   = numel(sizes)-1;
+            obj.sizes       = sizes;
 
             % Allocate storage for parameters between layers
-            obj.biases    = cell(obj.numLayers,1);
-            obj.weights   = cell(obj.numLayers,1);
+            obj.biases      = cell(obj.numLayers,1);
+            obj.weights     = cell(obj.numLayers,1);
 
             % Caches for activations per time-step
-            obj.actsStored      = cell(obj.numLayers+1,1);
-            obj.preactsStored   = cell(obj.numLayers+1,1);
+            obj.actCache    = cell(obj.numLayers+1,1);
+            obj.preactCache = cell(obj.numLayers+1,1);
 
             % Leaky ReLU parameter
-            obj.a = 0.01;
+            obj.a           = 0.01;
             
             % He initialization for weights and biases
             for i = 1:obj.numLayers
@@ -58,68 +58,77 @@ classdef FullyConnectedNetwork < handle
                 obj.vdb{j,1} = zeros(size(obj.biases{j}));
                 obj.sdb{j,1} = zeros(size(obj.biases{j}));
 
-                obj.dW{j,1} = zeros(size(obj.weights{j}));
-                obj.db{j,1} = zeros(size(obj.biases{j}));
+                obj.dW{j,1}  = zeros(size(obj.weights{j}));
+                obj.db{j,1}  = zeros(size(obj.biases{j}));
             end
         end
 
         %% Forward: process one time-step through all dense layers
-        function as = forward(obj, x_in, numSteps, t, varargin)
-            % x_in - input data, row vector  [1×inputSize]
-            % as   - output data, row vector [1×outputSize]
+        function a_out = forward(obj, x_in, numSteps, t, varargin)
+            % Inputs:
+            %   x_in     - input data, row vector  [1×inputSize]
+            %   numSteps - length of the training sequence
+            %   t        - current timestep of the training sequence
+            % Output:
+            %   a_out    - output activations, row vector [1×outputSize]
 
             doCache = ~isempty(varargin) && strcmp(varargin{1}, 'train');
 
             % Column vector for matrix operations
-            as = x_in';  
+            a_out   = x_in';  
 
             % Optionally cache input as layer 1 activations
             if doCache
-                if isempty(obj.actsStored{1})
+                if isempty(obj.actCache{1})
                     for i = 1:obj.numLayers+1
-                        obj.preactsStored{i} = zeros(numSteps,obj.sizes(i));
-                        obj.actsStored{i}    = zeros(numSteps,obj.sizes(i));
+                        obj.preactCache{i} = zeros(numSteps,obj.sizes(i));
+                        obj.actCache{i}    = zeros(numSteps,obj.sizes(i));
                     end
                 end
-                obj.preactsStored{1}(t,:) = x_in;
-                obj.actsStored{1}(t,:)    = x_in;
+                obj.preactCache{1}(t,:) = x_in;
+                obj.actCache{1}(t,:)    = x_in;
             end
 
             % Propagate through each layer
             for i = 1:obj.numLayers
-                z = obj.weights{i} * as + obj.biases{i};
+                z = obj.weights{i} * a_out + obj.biases{i};
                 
                 if i < obj.numLayers
-                    as = leakyReLU(z, obj.a);
+                    a_out = leakyReLU(z, obj.a);
                 else
-                    as = z;
+                    a_out = z;
                 end
 
                 if doCache
-                    obj.preactsStored{i+1}(t,:) = z';
-                    obj.actsStored{i+1}(t,:)    = as';
+                    obj.preactCache{i+1}(t,:) = z';
+                    obj.actCache{i+1}(t,:)    = a_out';
                 end
             end
 
             % Return as row vector [1×outputDim]
-            as = as';
+            a_out = a_out';
         end
 
         %% Backprop: compute gradients for time-step t
-        function [d_in, weightUpdate] = backprop(obj, d_out, t, idxMap)
-            % d_out: gradient from softmax layer, [1×outputDim]
-            % t: time index corresponding to cached activations
+        function [d_in, wUpdate] = backprop(obj, d_out, t, idxMap)
+            % Inputs:
+            %   d_out   - gradient from softmax layer, [1×outputDim]
+            %   t       - time index corresponding to cached activations
+            %   idxMap  - index map with separator indices of the weight update vector
+            % Outputs:
+            %   d_in    - backpropagated error at the input
+            %   wUpdate - update vector of weights and biases from timestep t
 
             % Initialize local gradient storage
-            weightUpdate = zeros(obj.numParams, 1);
+            wUpdate = zeros(obj.numParams, 1);
 
             % Column vector for matrix operations
             d_out = d_out';
         
             % Iterate backwards through layers
             for i = obj.numLayers:-1:1
-                % Retrieve preactivation in layer i at time t
-                z = obj.preactsStored{i+1}(t,:);
+                % Retrieve preactivation in layer i at time t_idx
+                z = obj.preactCache{i+1}(t,:);
                 
                 if i < obj.numLayers
                     delta = d_out .* leakyReLU_prime(z, obj.a);
@@ -130,12 +139,12 @@ classdef FullyConnectedNetwork < handle
                 % Bias gradient
                 startBias = idxMap.fcEnd(i) - numel(obj.biases{i}) + 1;
                 endBias   = idxMap.fcEnd(i);
-                weightUpdate(startBias:endBias) = delta;
+                wUpdate(startBias:endBias) = delta;
 
                 % Weight gradient: dL/dW = delta * a_prev^T
                 startWeights = idxMap.fcStrt(i);
                 endWeights   = idxMap.fcEnd(i) - numel(obj.biases{i});
-                weightUpdate(startWeights:endWeights) = delta * obj.actsStored{i}(t,:);
+                wUpdate(startWeights:endWeights) = delta * obj.actCache{i}(t,:);
 
                 % Error to previous layer
                 d_out = obj.weights{i}' * delta;
@@ -154,8 +163,8 @@ classdef FullyConnectedNetwork < handle
         %% Resets
         function resetStoredActivations(obj)
             % Clear cached activations for a new sequence
-            obj.actsStored    = cell(obj.numLayers+1,1);
-            obj.preactsStored = cell(obj.numLayers+1,1);
+            obj.actCache    = cell(obj.numLayers+1,1);
+            obj.preactCache = cell(obj.numLayers+1,1);
         end
 
         function resetGrads(obj)

@@ -3,7 +3,7 @@ classdef PoolingLayer < handle
     % Reduces time dimension by poolingRatio, retains channel and kernel dims
     properties
         poolingRatio
-        acts
+        actCache
     end
     
     %%
@@ -12,48 +12,57 @@ classdef PoolingLayer < handle
         function obj = PoolingLayer(poolingRatio)
             % Set pooling factor, initialize dummy params
             obj.poolingRatio = poolingRatio; % downsampling factor along time axis
-            obj.acts         = [];           % stores last input for backprop
+            obj.actCache     = [];           % stores last input for backprop
         end
         
         %% Forward: max over non-overlapping windows along time
-        function as = forward(obj, input, varargin)
-            % input: [T×C×K] tensor (time×channels×kernels)
+        function a_out = forward(obj, x_in, varargin)
+            % Inputs:
+            %   x_in     - input data tensor [numSteps × numChannels × inFeatures]
+            %   varargin - if 'train' is given, activations and preactivations are stored 
+            % Output:
+            %   a_out    - output activation tensor [{poolingRatio * numSteps} × numChannels × inFeatures] 
 
             doCache = ~isempty(varargin) && strcmp(varargin{1}, 'train');
 
             % Compute output size after pooling
-            outputLength = floor(size(input,1)/obj.poolingRatio);
-            sizes        = size(input);
+            outputLength = floor(size(x_in,1)/obj.poolingRatio);
+            sizes        = size(x_in);
             sizes(1)     = outputLength;
-            as           = zeros(sizes);
+            a_out        = zeros(sizes);
 
             % Slide window and take max across time slice
             for i = 1:outputLength
-                startIdx   = (i-1)*obj.poolingRatio+1;
-                endIdx     = i*obj.poolingRatio;
-                inputSlice = input(startIdx:endIdx, :, :);
-                % as(i,:,:)  = squeeze(max(inputSlice, [], 1));
-                as(i,:,:)  = max(inputSlice, [], 1);
+                startIdx     = (i-1)*obj.poolingRatio+1;
+                endIdx       = i*obj.poolingRatio;
+                inputSlice   = x_in(startIdx:endIdx, :, :);
+                a_out(i,:,:) = max(inputSlice, [], 1);
             end
 
             % Store activations and preactivations for backprop
             if doCache
-                obj.acts = input;
+                obj.actCache = x_in;
             end
         end
 
         %% Backprop: route gradients only to max positions
-        function [d_input, dW_new, db_new] = backprop(obj, d_output)
+        function [d_in, dW_new, db_new] = backprop(obj, d_out)
+            % Inputs:
+            %   d_out  - backpropagated error at the output, [outputSteps × numChannels × numFeatures]
+            % Outputs:
+            %   d_in   - backpropagated error at the input, [{poolingRatio * outputSteps} × numChannels × numFeatures]
+            %   dW_new - empty variable for uniform interface
+            %   db_new - empty variable for uniform interface
 
             % Prepare input gradient buffer
-            d_input            = zeros(size(obj.acts));
-            d_output_augmented = zeros(size(d_input));
-            argmaxMask         = zeros(size(d_input));
+            d_in               = zeros(size(obj.actCache));
+            d_output_augmented = zeros(size(d_in));
+            argmaxMask         = zeros(size(d_in));
 
             % For each pooled frame, find argmax locations
-            for i = 1:size(d_output,1)
-                [~, argmax_idx] = max(obj.acts(((i-1)*obj.poolingRatio+1:i*obj.poolingRatio),:,:), [], 1);
-                d_output_augmented(((i-1)*obj.poolingRatio+1:i*obj.poolingRatio),:,:) = repmat(d_output(i,:,:),[obj.poolingRatio,1,1]);
+            for i = 1:size(d_out,1)
+                [~, argmax_idx] = max(obj.actCache(((i-1)*obj.poolingRatio+1:i*obj.poolingRatio),:,:), [], 1);
+                d_output_augmented(((i-1)*obj.poolingRatio+1:i*obj.poolingRatio),:,:) = repmat(d_out(i,:,:),[obj.poolingRatio,1,1]);
 
                 % Mark positions where idx == p
                 for j = 1:obj.poolingRatio
@@ -63,7 +72,7 @@ classdef PoolingLayer < handle
             argmaxMask = logical(argmaxMask);
 
             % Assign gradients only at max locations
-            d_input(argmaxMask) = d_output_augmented(argmaxMask);
+            d_in(argmaxMask) = d_output_augmented(argmaxMask);
             
             % Dummies for compatibility
             dW_new = [];
@@ -72,7 +81,7 @@ classdef PoolingLayer < handle
 
         %% ResetStoredActivations: clear cached input
         function resetStoredActivations(obj)
-            obj.acts = [];
+            obj.actCache = [];
         end
     end
 end
