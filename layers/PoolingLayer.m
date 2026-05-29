@@ -16,14 +16,12 @@ classdef PoolingLayer < handle
         end
         
         %% Forward: max over non-overlapping windows along time
-        function a_out = forward(obj, x_in, varargin)
+        function a_out = forward(obj, x_in, isTraining)
             % Inputs:
             %   x_in     - input data tensor [numSteps × numChannels × inFeatures]
             %   varargin - if 'train' is given, activations and preactivations are stored 
             % Output:
             %   a_out    - output activation tensor [{poolingRatio * numSteps} × numChannels × inFeatures] 
-
-            doCache = ~isempty(varargin) && strcmp(varargin{1}, 'train');
 
             % Compute output size after pooling
             outputLength = floor(size(x_in,1)/obj.poolingRatio);
@@ -40,7 +38,7 @@ classdef PoolingLayer < handle
             end
 
             % Store activations and preactivations for backprop
-            if doCache
+            if isTraining
                 obj.actCache = x_in;
             end
         end

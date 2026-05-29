@@ -54,14 +54,13 @@ classdef ConvolutionalLayer < handle
         end
         
         %% Forward: 1D convolutions over time
-        function a_out = forward(obj, x_in, varargin)
+        function a_out = forward(obj, x_in, isTraining)
             % Inputs:
-            %   x_in     - input data tensor [T × numChannels × inFeatures]
-            %   varargin - if 'train' is given, activations and preactivations are stored 
+            %   x_in       - input data tensor [T × numChannels × inFeatures]
+            %   isTraining - if true, activations and preactivations are stored 
             % Output:
-            %   a_out    - output activation tensor [numSteps × numChannels × outFeatures] 
+            %   a_out      - output activation tensor [numSteps × numChannels × outFeatures] 
 
-            doCache  = ~isempty(varargin) && strcmp(varargin{1}, 'train');
             numSteps = size(x_in,1) - obj.kernelSize + 1;
             a_out    = zeros(numSteps, obj.numChannels, obj.outFeatures);  % activations
             zs       = zeros(numSteps, obj.numChannels, obj.outFeatures);  % pre-activations
@@ -85,7 +84,7 @@ classdef ConvolutionalLayer < handle
             end
 
             % Cache for backprop
-            if doCache
+            if isTraining
                 obj.actCache    = x_in;
                 obj.preactCache = zs;
             end
