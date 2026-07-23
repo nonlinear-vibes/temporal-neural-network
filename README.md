@@ -64,6 +64,3 @@ The classifier scales well to real data and has been tested on larger real-world
 MATLAB R2020b+ recommended (uses inputParser, object-oriented classes, cellfun heavily).
 
 Parallel Computing Toolbox needed.
-
-## Notes:
-This project intentionally implements all core operations manually rather than relying on MATLAB Deep Learning Toolbox abstractions. The goal is transparency, experimentation, and educational value in addition to practical sequence modelling.
