@@ -9,6 +9,8 @@ The architecture pipeline is:
 All modules and layers are optional, but the order CNN $\rightarrow$ RNN $\rightarrow$ FC is fixed.
 <br/><br/>
 
+![preview](docs/GRU.png)
+
 ## Key methods:
 - **Construct a network:** `net = TemporalNeuralNet(validationData, Name,Value, ...)` \
   Constructs the network with the layer configurations specified by name-value pairs using He initialization and initializes training metrics using the validation set (`validationData`). See `TemporalNeuralNet.m` and `demo.m` for details and examples.
