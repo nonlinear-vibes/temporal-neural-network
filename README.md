@@ -9,7 +9,9 @@ The architecture pipeline is:
 All modules and layers are optional, but the order CNN $\rightarrow$ RNN $\rightarrow$ FC is fixed.
 <br/><br/>
 
-![preview](docs/GRU.png)
+<p align="center">
+  <img src="docs/GRU.png" />
+</p>
 
 ## Key methods:
 - **Construct a network:** `net = TemporalNeuralNet(validationData, Name,Value, ...)` \
