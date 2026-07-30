@@ -10,8 +10,9 @@ All modules and layers are optional, but the order CNN $\rightarrow$ RNN $\right
 <br/><br/>
 
 <p align="center">
-  <img src="docs/training_demo.png" />
+  <img src="docs/training_demo.gif" width="750" alt="training demo">
 </p>
+<p align="center">Demo: CNN-GRU-FC architecture learning to distinguish three classes from synthetic data.</p>
 
 ## Key methods:
 - **Construct a network:** `net = TemporalNeuralNet(validationData, Name,Value, ...)` \
