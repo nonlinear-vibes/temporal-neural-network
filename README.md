@@ -10,7 +10,7 @@ All modules and layers are optional, but the order CNN $\rightarrow$ RNN $\right
 <br/><br/>
 
 <p align="center">
-  <img src="docs/GRU.png" />
+  <img src="docs/training_demo.png" />
 </p>
 
 ## Key methods:
@@ -45,6 +45,10 @@ For a detailed explanation of configurations and inputs/outputs, see the header 
 
 ### Fully Connected Network ###
 - Classifier head with arbitrary depth and leaky-ReLU activations
+
+<p align="center">
+  <img src="docs/GRU.png" />
+</p>
 
 ## Parallel Training:
 Mini-batch gradient computation is parallelized using `parfor`. Each worker computes local gradients which are aggregated before optimizer updates, substantially improving training throughput on large datasets.
