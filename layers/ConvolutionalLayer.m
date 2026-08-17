@@ -30,14 +30,9 @@ classdef ConvolutionalLayer < handle
             obj.weights = randn(kernelSize, numChannels, outFeatures, inFeatures) * scale;
 
             % Initialize biases to negative mean of weights
-            meanWeights = squeeze(mean(obj.weights,1));
-            biasValues  = mean(meanWeights,3);
-
-            if size(biasValues,1) == 1
-                obj.biases = -biasValues'; 
-            else
-                obj.biases = -biasValues;   
-            end
+            meanWeights = reshape(mean(obj.weights,1), [numChannels, outFeatures, inFeatures]);
+            biasValues  = mean(meanWeights,3);              % [numChannels x outFeatures]
+            obj.biases  = -biasValues;
 
             % Initialize Adam moments
             obj.vdw = zeros(size(obj.weights));
@@ -62,22 +57,19 @@ classdef ConvolutionalLayer < handle
             %   a_out      - output activation tensor [numSteps × numChannels × outFeatures] 
 
             numSteps = size(x_in,1) - obj.kernelSize + 1;
-            a_out    = zeros(numSteps, obj.numChannels, obj.outFeatures);  % activations
-            zs       = zeros(numSteps, obj.numChannels, obj.outFeatures);  % pre-activations
-
-            % Perform convolution
+            a_out    = zeros(numSteps, obj.numChannels, obj.outFeatures);
+            zs       = zeros(numSteps, obj.numChannels, obj.outFeatures);
+        
             for i = 1:numSteps
-                step_Index = 1 + (i-1);
+                xSlice = x_in(i:i+obj.kernelSize-1,:,:);   % [kernelSize x numChannels x inFeatures]
                 for k = 1:obj.outFeatures
-                    dotproduct = x_in(step_Index:step_Index+obj.kernelSize-1,:,:) .* squeeze(obj.weights(:,:,k,:));
-                    z = sum(dotproduct);
-                    if length(size(z)) ~= 2
-                        z = sum(z,4);
-                        z = reshape(z,[obj.numChannels,obj.inFeatures])';
-                        if size(z,1) ~= 1
-                            z = sum(z);
-                        end
-                    end
+                    % Reshape to the known target shape instead of squeeze(),
+                    % which would silently drop numChannels or inFeatures too
+                    % if either equals 1.
+                    Wk = reshape(obj.weights(:,:,k,:), [obj.kernelSize, obj.numChannels, obj.inFeatures]);
+                    dotproduct = xSlice .* Wk;                                   % [kernelSize x numChannels x inFeatures]
+                    z = reshape(sum(sum(dotproduct,1),3), [1, obj.numChannels]); % sum over kernel taps + input features
+        
                     zs(i,:,k)    = z + obj.biases(:,k)';
                     a_out(i,:,k) = leakyReLU(zs(i,:,k),obj.a);
                 end
@@ -110,10 +102,12 @@ classdef ConvolutionalLayer < handle
             for k = 1:obj.outFeatures
                 for j = 1:obj.kernelSize
                     D = obj.actCache(j:end-obj.kernelSize+j,:,:) .* leakyReLU_prime(obj.preactCache(:,:,k),obj.a);
-                    dW_new(j,:,k,:) = squeeze(sum(D .* d_out(:,:,k),1));
+                    dW_new(j,:,k,:) = reshape(sum(D .* d_out(:,:,k),1), [1, obj.numChannels, 1, obj.inFeatures]);
                     if j == 1
+                        Wk = reshape(obj.weights(:,:,k,:), [obj.kernelSize, obj.numChannels, obj.inFeatures]);
                         for i = 1:numSteps
-                            d_in(i:i+obj.kernelSize-1,:,:) = d_in(i:i+obj.kernelSize-1,:,:) + squeeze(obj.weights(:,:,k,:)).*reshape(leakyReLU_prime(obj.preactCache(i,:,k),obj.a).*d_out(i,:,k),[1,obj.numChannels,1]);
+                            gate = reshape(leakyReLU_prime(obj.preactCache(i,:,k),obj.a).*d_out(i,:,k), [1, obj.numChannels, 1]);
+                            d_in(i:i+obj.kernelSize-1,:,:) = d_in(i:i+obj.kernelSize-1,:,:) + Wk .* gate;
                         end
                     end
                 end

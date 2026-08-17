@@ -59,20 +59,29 @@ classdef LSTMUnit < handle
             % Outputs:
             %   a_out    - backpropagated error to the previous layer, [1 × outSize]
 
-            doCache = ~isempty(varargin) && strcmp(varargin{1}, 'train');
+            doCache = false;
+            for k = 1:2:numel(varargin)
+                if strcmpi(varargin{k}, 'train')
+                    doCache = logical(varargin{k+1});
+                end
+            end
 
             % columnize input for matrix ops
             x_in    = x_in';
-            c_prev  = obj.cLong(:,t);
-            h_prev  = obj.hShort(:,t);
+            c_prev  = obj.cLong(:,min(t, size(obj.cLong,2)));
+            h_prev  = obj.hShort(:,min(t, size(obj.hShort,2)));
             
             preacts = obj.weights{1} * [x_in; h_prev] + obj.biases{1};
-            a_out   = sigm(preacts(1:3*obj.outSize));
+            gates   = sigm(preacts(1:3*obj.outSize));
             c_tilde = tanh(preacts(3*obj.outSize+1:end));
 
-            c       = a_out(1:obj.outSize) .* c_prev + a_out(obj.outSize+1:2*obj.outSize) .* c_tilde;
-            h       = a_out(2*obj.outSize+1:end) .* tanh(c);
-
+            f_t     = gates(1:obj.outSize);
+            i_t     = gates(obj.outSize+1:2*obj.outSize);
+            o_t     = gates(2*obj.outSize+1:end);
+        
+            c       = f_t .* c_prev + i_t .* c_tilde;
+            h       = o_t .* tanh(c);
+            
             % convert back to row form
             a_out = h';
 
@@ -81,13 +90,13 @@ classdef LSTMUnit < handle
                     % initialize activation and hidden state cache
                     obj.hShort      = zeros(length(h),numSteps+1);
                     obj.cLong       = zeros(length(c),numSteps+1);
-                    obj.actCache    = zeros(length(a_out)+length(c_tilde),numSteps);
+                    obj.actCache    = zeros(length(gates)+length(c_tilde),numSteps);
                     obj.preactCache = zeros(length(x_in),numSteps);
                 end
                 % append to history for BPTT...
                 obj.hShort(:,t+1)    = h;
                 obj.cLong(:,t+1)     = c;
-                obj.actCache(:,t)    = [a_out; c_tilde];
+                obj.actCache(:,t)    = [gates; c_tilde];
                 obj.preactCache(:,t) = x_in;
             else
                 % or keep only the last state for inference
@@ -126,8 +135,7 @@ classdef LSTMUnit < handle
             delta_i   = delta .* c_tilde_t .* i_t .* (1 - i_t);
             delta_c   = delta .* f_t;
 
-            dLdh_tot_c   = d_out + obj.weights{1}(1:3*obj.outSize,obj.inSize+1:end)' * obj.dLdh(1:3*obj.outSize);
-            delta_ctilde = (dLdh_tot_c .* o_t .* (1 - tanh(c_t).^2) + obj.dLdc) .* i_t .* (1 - c_tilde_t.^2);
+            delta_ctilde = delta .* i_t .* (1 - c_tilde_t.^2);
         
             dW_new    = {[delta_f; delta_i; delta_o; delta_ctilde] * [x_t; h_prev]'};
             db_new    = {[delta_f; delta_i; delta_o; delta_ctilde]};        

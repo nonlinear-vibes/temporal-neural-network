@@ -70,20 +70,25 @@ classdef GRUnit < handle
             % Outputs:
             %   a_out    - backpropagated error to the previous layer, [1 × outSize]
 
-            doCache = ~isempty(varargin) && strcmp(varargin{1}, 'train');
+            doCache = false;
+            for k = 1:2:numel(varargin)
+                if strcmpi(varargin{k}, 'train')
+                    doCache = logical(varargin{k+1});
+                end
+            end
 
             % columnize input for matrix ops
             x_in  = x_in';
+            readIdx = min(t, size(obj.hState,2));
             
-            z_pre = obj.weights{1} * [x_in; obj.hState(:,t)] + obj.biases{1};
+            z_pre = obj.weights{1} * [x_in; obj.hState(:,readIdx)] + obj.biases{1};
             z     = sigm(z_pre);
-
-            r_pre = obj.weights{2} * [x_in; obj.hState(:,t)] + obj.biases{2};
+         
+            r_pre = obj.weights{2} * [x_in; obj.hState(:,readIdx)] + obj.biases{2};
             r     = sigm(r_pre);
-
-            hhat  = tanh(obj.weights{3} * [x_in; r.*obj.hState(:,t)] + obj.biases{3});
-
-            h     = z .* obj.hState(:,t) + (1 - z) .* hhat;
+        
+            hhat  = tanh(obj.weights{3} * [x_in; r.*obj.hState(:,readIdx)] + obj.biases{3});
+            h     = z .* obj.hState(:,readIdx) + (1 - z) .* hhat;
 
             % convert back to row form
             a_out = h';
@@ -95,14 +100,14 @@ classdef GRUnit < handle
                     obj.preactCache  = zeros(length(x_in),numSteps);
                     obj.zs           = zeros(length(z),numSteps);
                     obj.rs           = zeros(length(r),numSteps);
-                    obj.hhats        = zeros(length(hhat),numSteps+1);
+                    obj.hhats        = zeros(length(hhat),numSteps);
                 end
                 % append to history for BPTT...
                 obj.hState(:,t+1)    = h;
                 obj.preactCache(:,t) = x_in;
                 obj.zs(:,t)          = z;
                 obj.rs(:,t)          = r;
-                obj.hhats(:,t+1)     = hhat;
+                obj.hhats(:,t)       = hhat;
             else
                 % or keep only the last state for inference
                 obj.hState = h;
@@ -156,9 +161,9 @@ classdef GRUnit < handle
             db_new{3} = delta_h;             
             
             % Package errors for next step
-            obj.dLdh  = delta.*zt + Uz'*delta_z + Uh'*(delta_h.*rt) + Ur'*delta_r;  % push ∂E/∂h_prev back in time
-            d_in      = Wz'*delta_z + Wh'*delta_h + Wr'*delta_r;                    % propagate error into input
-            d_in      = d_in';                                                      % back to row form
+            obj.dLdh  = delta.*zt   + Uz'*delta_z + (Uh'*delta_h).*rt + Ur'*delta_r;  % push ∂E/∂h_prev back in time
+            d_in      = Wz'*delta_z + Wh'*delta_h +                     Wr'*delta_r;  % propagate error into input
+            d_in      = d_in';                                                        % back to row form
         end
 
         %% ApplyAdam: update weights and biases with Adam

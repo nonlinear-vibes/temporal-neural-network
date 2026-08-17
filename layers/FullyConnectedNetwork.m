@@ -72,7 +72,12 @@ classdef FullyConnectedNetwork < handle
             % Output:
             %   a_out    - output activations, row vector [1×outputSize]
 
-            doCache = ~isempty(varargin) && strcmp(varargin{1}, 'train');
+            doCache = false;
+            for k = 1:2:numel(varargin)
+                if strcmpi(varargin{k}, 'train')
+                    doCache = logical(varargin{k+1});
+                end
+            end
 
             % Column vector for matrix operations
             a_out   = x_in';  

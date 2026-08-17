@@ -77,13 +77,19 @@ classdef RecurrentUnit < handle
             % Outputs:
             %   a_out    - backpropagated error to the previous layer, [1 × outSize]
 
-            doCache = ~isempty(varargin) && strcmp(varargin{1}, 'train');
+            doCache = false;
+            for k = 1:2:numel(varargin)
+                if strcmpi(varargin{k}, 'train')
+                    doCache = logical(varargin{k+1});
+                end
+            end
 
             % columnize input for matrix ops
             x_in    = x_in';
+            readIdx = min(t, size(obj.hState,2));
             
             % compute hidden pre-activation and activation
-            zh      = obj.weights{1} * [x_in; obj.hState(:,t)] + obj.biases{1};
+            zh      = obj.weights{1} * [x_in; obj.hState(:,readIdx)] + obj.biases{1};
             h       = ReLU(zh, obj.a);
 
             % compute output pre-activation and activation
@@ -150,8 +156,8 @@ classdef RecurrentUnit < handle
         
             % Package errors for next step
             obj.dLdh  = obj.weights{1}(:,obj.inSize+1:end)' * delta_h;    % push ∂E/∂h_prev back in time
-            d_in      = obj.weights{1}(:,1:obj.inSize)' * delta_h;        % propagate error into input
-            d_in      = d_in';                                               % back to row form
+            d_in      = obj.weights{1}(:,1:obj.inSize)'     * delta_h;    % propagate error into input
+            d_in      = d_in';                                            % back to row form
         end
 
         %% ApplyAdam: update weights and biases with Adam
