@@ -1,6 +1,8 @@
 # TemporalNeuralNet
 A modular deep learning framework for multivariate time-series classification in MATLAB. Combines temporal convolutional feature extraction, recurrent sequence modelling, and fully connected classification into a configurable pipeline for supervised learning on sequential data.
 
+STALE README, WILL BE UPDATED
+
 The architecture pipeline is:
 - Temporal CNN module (Convolutional and max-pooling layers) on each input channel for feature extraction
 - Recurrent module (vanilla RNN, GRU, and LSTM units) for temporal modelling
