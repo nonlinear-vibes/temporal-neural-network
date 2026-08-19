@@ -76,9 +76,9 @@ classdef Predictor < TemporalNeuralNet
             addParameter(p,'forecastLength', 1,    @(x) isnumeric(x)&&isscalar(x));
             addParameter(p,'segmentLength',  24,    @(x) isnumeric(x)&&isscalar(x));
             parse(p, varargin{:});
-            isTraining          = p.Results.isTraining;
-            forecastL = p.Results.forecastLength;
-            segmentLength       = p.Results.segmentLength;
+            isTraining    = p.Results.isTraining;
+            forecastL     = p.Results.forecastLength;
+            segmentLength = p.Results.segmentLength;
  
             wasCell = iscell(inputData);
             if wasCell
@@ -180,22 +180,32 @@ classdef Predictor < TemporalNeuralNet
                     end
 
                     % parfor
-                    for segmIdx = 1:size(trialIdxs,1)
-                        obj.resetMemory();
+                    parfor segmIdx = 1:size(trialIdxs,1)
+                        
                         trainSegment   = batchData{segmIdx};
                         contextSegment = trainSegment(1:end-numAutoregSteps, :);
 
-                        output = obj.forward(contextSegment, 'isTraining', true);
+                        for autoregStep = 1:numAutoregSteps
+                            obj.resetMemory();
 
-                        [cnnSeqUpdate, rnnSeqUpdate, fcSeqUpdate, totalAE, totalSE, totalSamples] = obj.backwardPass(output, trainSegment);
+                            % build target sequence
+                            targetSequence = trainSegment(autoregStep:end-numAutoregSteps+autoregStep,:);
 
-                        cnnBatchUpdate = cnnBatchUpdate + cnnSeqUpdate;
-                        rnnBatchUpdate = rnnBatchUpdate + rnnSeqUpdate;
-                        fcBatchUpdate  = fcBatchUpdate  + fcSeqUpdate;
+                            output = obj.forward(contextSegment, 'isTraining', true);
 
-                        totalAE_batch      = totalAE_batch      + totalAE;
-                        totalSE_batch      = totalSE_batch      + totalSE;
-                        totalSamples_batch = totalSamples_batch + totalSamples;
+                            [cnnSeqUpdate, rnnSeqUpdate, fcSeqUpdate, totalAE, totalSE, totalSamples] = obj.backwardPass(output, targetSequence);
+
+                            contextSegment = [contextSegment(2:end,:); output(end,:)];
+                            
+                            % accumulate things
+                            cnnBatchUpdate = cnnBatchUpdate + cnnSeqUpdate;
+                            rnnBatchUpdate = rnnBatchUpdate + rnnSeqUpdate;
+                            fcBatchUpdate  = fcBatchUpdate  + fcSeqUpdate;
+
+                            totalAE_batch      = totalAE_batch      + totalAE;
+                            totalSE_batch      = totalSE_batch      + totalSE;
+                            totalSamples_batch = totalSamples_batch + totalSamples;
+                        end
                     end
 
                     convLayerIdx = 0;
@@ -244,7 +254,7 @@ classdef Predictor < TemporalNeuralNet
                     subplot(2,1,2); cla;
                     plot(obj.trainingMetricHistory);
                     grid on; % axis padded;
-                    title('Validation metric (MAE)');
+                    title('Secondary metric (MAE)');
                     xlabel('Batch'); ylabel('MAE');
                     drawnow
                     totalAE_epoch      = totalAE_epoch      + totalAE_batch;
@@ -259,7 +269,7 @@ classdef Predictor < TemporalNeuralNet
                 trainingMAE   = totalAE_epoch/totalSamples_epoch;
                 residual      = totalSE_epoch/totalSamples_epoch;
 
-                validationMAE = obj.evaluate(validationData, obj.forecastLength, obj.forecastLength);
+                validationMAE = obj.evaluate(validationData, obj.forecastLength, obj.trainingLength);
                 obj.learningHistory(end+1,:) = [batchSize, numAutoregSteps, obj.eta, validationMAE, trainingMAE, residual, elapsedTime];
                 fprintf('Validation MAE: %.4f\n', validationMAE);
                 obj.eta = obj.learningRateDecay*obj.eta;
