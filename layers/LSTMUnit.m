@@ -130,11 +130,10 @@ classdef LSTMUnit < handle
             dLdh_tot  = d_out + obj.weights{1}(:,obj.inSize+1:end)' * obj.dLdh;
             delta     = dLdh_tot .* o_t .* (1 - tanh(c_t).^2) + obj.dLdc;
 
-            delta_o   = dLdh_tot .* tanh(c_t) .* o_t .* (1 - o_t);
-            delta_f   = delta .* c_prev .* f_t .* (1 - f_t);
-            delta_i   = delta .* c_tilde_t .* i_t .* (1 - i_t);
-            delta_c   = delta .* f_t;
-
+            delta_o      = dLdh_tot .* tanh(c_t) .* o_t .* (1 - o_t);
+            delta_f      = delta .* c_prev .* f_t .* (1 - f_t);
+            delta_i      = delta .* c_tilde_t .* i_t .* (1 - i_t);
+            delta_c      = delta .* f_t;
             delta_ctilde = delta .* i_t .* (1 - c_tilde_t.^2);
         
             dW_new    = {[delta_f; delta_i; delta_o; delta_ctilde] * [x_t; h_prev]'};
