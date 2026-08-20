@@ -1,13 +1,33 @@
 classdef Classifier < TemporalNeuralNet
-    %% CLASSIFIER: dense sequence-labeling subclass of TemporalNeuralNet
+    %% CLASSIFIER: sequence-labelling subclass of TemporalNeuralNet
     %
- 
+    % Every timestep gets its own class via forward(). Loss is weighted cross-entropy
+    % (weighted by inverse label frequency, via countTrainingLabels(), to counter
+    % class imbalance); targets are the average one-hot label over each output step's
+    % raw-data window, taken at that window's midpoint.
+    %
+    % See TemporalNeuralNet.m for the shared CNN->RNN->FC backbone (forward()), Adam
+    % optimizer, and memory/gradient reset helpers.
+    %
+    % DATA FORMAT: trainingData/validationData/testData are N x 2 cell arrays; each
+    % row is {sequence, labels}, sequence [T x numChannels], one-hot encoded labels
+    % [T x numClasses].
+
     properties
-        numClasses
+        numClasses   % final output width, number of classes
     end
  
     methods
         %% Classifier constructor
+        % Inputs:
+        %   validarionData - N x 2 cell array {sequence, labels}, used to compute the
+        %                  initial model accuracy stored as the first row of learningHistory
+        %   'numClasses' - (name-value pair, default 16) number of output classes.
+        %   
+        %   (anything other name-value pair is forwarded to TemporalNeuralNet's constructor)
+        %
+        % Output: obj, ready to train() or forward().
+
         function obj = Classifier(trainingData, varargin)
             p = inputParser;
             p.KeepUnmatched = true;
@@ -28,20 +48,24 @@ classdef Classifier < TemporalNeuralNet
         end
  
         %% outputActivation: classification -- softmax over the raw FC output
+        % Calls the local softmx() function
         function a = outputActivation(~, z)
             a = softmx(z);
         end
  
         %% Train: Optimize network
+        % Inputs:
+        %   trainingData, validationData - N x 2 cell arrays, {sequence, labels} per row
+        %   epochs        - number of full passes over trainingData
+        %   batchSize     - segments per Adam update
+        %   'numSegments' - name-value pair, number of base segments to split each trial
+        %                   into. The number of total segments per trial is
+        %                   numSegments + 3*(numSegments-1), with a 75% overlap.
+        %
+        % Output: none (mutates obj: weights, learningHistory, totalLossHistory,
+        %         trainingMetricHistory; also saves a Classifier_trained_<timestamp>.mat
+        %         checkpoint after every epoch).
         function train(obj, trainingData, validationData, epochs, batchSize, varargin)
-            % Inputs:
-            %   trainingData   - cell array {sequence, labels}
-            %   validationData - data for validation in each epoch
-            %   epochs         - number of full data passes
-            %   batchSize      - segments per update
-            %
-            %   trains with no regard to temporal dependencies if no 'numSegments' is given
-            %   (e.g. in case of no RNN module)
 
             p = inputParser;
             addParameter(p,'numSegments', [], @(x) isnumeric(x)); % number of non-overlapping segments
@@ -65,10 +89,10 @@ classdef Classifier < TemporalNeuralNet
                 correctCount_epoch = 0;
                 totalEntropy_epoch = 0;
                 totalSamples_epoch = 0;
-        
+		
                 % Go through the batches
                 for b = 1:ceil(size(segmInfos,1)/batchSize)
-        
+		
                     % Clear gradient accumulators
                     obj.resetGrads();
                     
@@ -206,15 +230,20 @@ classdef Classifier < TemporalNeuralNet
         end
  
         %% Evaluate: Compute overall classification accuracy on test set
+        % For each trial, runs a forward() pass and compares the predicted class at each
+        % output step against the ground truth label taken at that step's raw-data window
+        % midpoint.
+        %
+        % Inputs:
+        %   data - N×2 cell array, each row: {rawSequence, oneHotLabels}
+        %
+        % Output:
+        %   acc  - fraction of correctly predicted time-segments across every trial.
         function acc = evaluate(obj, data)
-            % Inputs: 
-            %   testData  - N×2 cell array, each row: {rawSequence, oneHotLabels}
-            % Output:
-            %   acc       - fraction of correctly predicted time‐segments
-
+					  
             % Initialize counters
             correctCount = 0;
-            totalSteps  = 0;
+            totalSteps   = 0;
         
             % Loop through each item in the test data
             for i = 1:size(data, 1)
@@ -254,9 +283,8 @@ classdef Classifier < TemporalNeuralNet
         
                 % Accumulate count of evaluated segments
                 totalSteps = totalSteps + outputLength;
-                
             end
-        
+      
             % Overall success rate
             if totalSteps == 0
                 warning('No evaluable frames found.');
@@ -267,18 +295,23 @@ classdef Classifier < TemporalNeuralNet
         end
  
         %% backwardPass: runs backpropagation through all the layers of the network
+        % Backprops one forward()-with-caching pass's worth of output against ground truth labels,
+        % through the full network, accumulating flat idxMap-packed gradient vectors. Called once
+        % per training segment inside train().
+        %
+        % Inputs:
+        %   output       - Final classification output of the network, [numSteps × numClasses]
+        %   labels       - One-hot encoded ground truth labels, [numSteps × numClasses]
+        %   labelWeights - Frequency of labels, [1 × numClasses]
+        %
+        % Outputs:
+        %   cnnSeqUpdate - Gradient update for the CNN module
+        %   rnnSeqUpdate - Gradient update for the RNN module
+        %   fcSeqUpdate  - Gradient update for the FC module
+        %   correctCount - Number of correctly classified steps
+        %   totalEntropy - Sum of the residuals over the whole sequence
+        %   totalSamples - Number of steps in the sequence
         function [cnnSeqUpdate, rnnSeqUpdate, fcSeqUpdate, correctCount, totalEntropy, totalSamples] = backwardPass(obj, output, labels, labelWeights)
-            % Inputs:
-            %   output       - Final classification output of the network, [numSteps × numClasses]
-            %   labels       - One-hot encoded ground truth labels, [numSteps × numClasses]
-            %   labelWeights - Frequency of labels, [1 × numClasses]
-            % Outputs:
-            %   cnnSeqUpdate - Gradient update for the CNN module
-            %   rnnSeqUpdate - Gradient update for the RNN module
-            %   fcSeqUpdate  - Gradient update for the FC module
-            %   correctCount - Number of correctly classified steps
-            %   totalEntropy - Sum of the residuals over the whole sequence
-            %   totalSamples - Number of steps in the sequence
 
             outputLength   = size(output,1);
 
@@ -288,15 +321,15 @@ classdef Classifier < TemporalNeuralNet
             totalSamples   = 0;
 
             % Storage for weight and bias updates
-            cnnSeqUpdate   = zeros(obj.idxMap.cnnEnd(end),1);
-            fcSeqUpdate    = zeros(obj.idxMap.fcEnd(end), 1);
+            cnnSeqUpdate   = zeros(obj.idxMap.cnnStrt(end)-1,1);
+            fcSeqUpdate    = zeros(obj.idxMap.fcStrt(end)-1, 1);
             rnnSeqUpdate   = zeros(obj.idxMap.rnn{end}(end,2),1);
 
             % Storage for backpropagated error at the CNN output
             if ~isempty(obj.cnnModule)
                 convIdx = 1;
                 for i = numel(obj.cnnModule):-1:1
-                    if isa(obj.cnnModule, 'ConvolutionalLayer')
+                    if isa(obj.cnnModule{i}, 'ConvolutionalLayer')
                         convIdx = i;
                     end
                 end
@@ -352,7 +385,7 @@ classdef Classifier < TemporalNeuralNet
                     endT   = startT + obj.tPool - 1;
                     dxCNN(startT:endT, :, :) = dx;
                 end
-                
+             
                 fcSeqUpdate  = fcSeqUpdate  + localFcUpdate;
             end
 
@@ -374,18 +407,21 @@ classdef Classifier < TemporalNeuralNet
             end
             totalSamples = totalSamples + outputLength; 
         end
-    end
- 
-    methods (Static)
+
         %% segmentSequences: overlapping fixed-count segments per trial
+        % Two distinct windowing strategies depending on whether numSegments is given.
+        %
+        % Inputs:
+        %   trainingData: N×2 cell array {data, labels}
+        %   numSegments : number of base segments per trial. If given, splits each trial
+        %                 into numSegments windows with 75% overlap (segment length = rawLength /
+        %                 numSegments). If empty, falls back to a fixed stride-2 sliding window
+        %                 sized from the CNN architecture (obj.cnnWindowSize/tPool/
+        %                 cnnStepSize) instead.
+        % Output:
+        %   segmInfos   : M×3 array [trialIdx, startIdx, endIdx]
         function segmInfos = segmentSequences(trainingData, numSegments)
-            % Splits each trial into overlapping windows.
-            % Inputs:
-            %   trainingData: N×2 cell array {data, labels}
-            %   numSegments : number of base segments per trial
-            % Output:
-            %   segmInfos   : M×3 array [trialIdx, startIdx, endIdx]
-        
+														
             if ~isempty(numSegments)
                 % Calculate total windows per trial with 75% overlap
                 segmPerTrial = numSegments + 3*(numSegments-1);
@@ -408,7 +444,6 @@ classdef Classifier < TemporalNeuralNet
                     startIdx(base:i*segmPerTrial) = [0:segmPerTrial-1]*shift+1;
                     endIdx(base:i*segmPerTrial)   = [0:segmPerTrial-1]*shift+segmLength;
                 end
-
             else
                 numTrials  = size(trainingData,1);
                 trialIdx   = [];
@@ -433,6 +468,14 @@ classdef Classifier < TemporalNeuralNet
 end
 
 %% Compute label weights based on their frequencies
+% Inputs:
+%   trainingData - N x 2 cell array {sequence, labels}
+%   numClasses   - number of classes
+% Output:
+%   labelWeights - [1 x numClasses], roughly (1/frequency); used to upweight rare classes
+%                  in the cross-entropy loss (backwardPass divides the softmax gradient by this).
+%                  Classes with zero training examples get weight numClasses (frequency floored
+%                  at 1 to avoid zero-division).
 function labelWeights = countTrainingLabels(trainingData, numClasses)
 
     labelCount = zeros(1,numClasses);
@@ -448,6 +491,9 @@ function labelWeights = countTrainingLabels(trainingData, numClasses)
 end
 
 %% Softmax
+% Input:  a - row vector of raw scores (one timestep's worth)
+% Output: s - same shape, normalized to a probability distribution.
+% Named softmx, not softmax, deliberately to avoid collision with the built-in softmax.
 function s = softmx(a)
     exp_a = exp(a-max(a));
     s     = exp_a / sum(exp_a);

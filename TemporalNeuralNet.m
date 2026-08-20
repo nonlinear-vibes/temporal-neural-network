@@ -1,39 +1,87 @@
 classdef (Abstract) TemporalNeuralNet < handle
     %% TEMPORALNEURALNET (abstract): shared CNN -> RNN/GRU/LSTM -> FC backbone
     %
-    % Abstract base class for the identical aspects of Classifier and Predictor: 
+    % Abstract base class for the identical aspects of Classifier and Predictor:
     % layer construction, the idxMap gradient-slicing index, the shared
-    % CNN->RNN->FC forward pass for a single fixed-length window (forwardStep),
-    % the Adam optimizer wiring, and the memory/gradient reset helpers.
- 
+    % CNN->RNN->FC forward pass for a single fixed-length window (forward), the
+    % Adam optimizer wiring, and the memory/gradient reset helpers.
+    %
+    % ARCHITECTURE
+    %  Input sequence -> [CNN/pooling layers] -> [RNN/GRU/LSTM layers] -> 
+    %  -> [fully connected head] -> per-step output
+    %  All three stages are optional, but the order is fixed. 
+    % 
+    %  Shared:   constructor (layer/idxMap/optimizer setup), forward(),
+    %            adamOptimizer(), resetMemory(), resetGrads()
+    %  Abstract: train(), backwardPass(), evaluate(), segmentSequences(),
+    %            outputActivation()
+    %
+    %  Classifier: dense per-timestep classification, cross-entropy loss,
+    %              windowed-label targets
+    %  Predictor:  autoregressive multi-step forecast, MSE loss, 
+    %              next-raw-value targets
+
+
     properties
-        cnnModule
-        rnnModule
-        fcModule
- 
-        tPool
-        outputWidth
-        numChannels
-        timeStep
- 
-        cnnWindowSize
-        cnnStepSize
-        idxMap
- 
-        eta
-        beta_1
-        beta_2
-        epsilon
-        learningRateDecay
-        t
- 
-        learningHistory       % per-epoch log
-        totalLossHistory      % per-batch loss (cross-entropy for Classifier, MSE for Predictor
-        trainingMetricHistory % per-batch metric (accuracy for Classifier, MAE for Predictor)
+        cnnModule             % cell array of ConvolutionalLayer/PoolingLayer objects, in order (may be empty)
+        rnnModule             % cell array of RecurrentUnit/GRUnit/LSTMUnit objects, in order (may be empty)
+        fcModule              % single FullyConnectedNetwork object (may be empty)
+        tPool                 % number of consecutive CNN-output steps grouped into one RNN/FC input frame
+        outputWidth           % final per-step output width; set by the subclass constructor
+        numChannels           % number of raw input channels (columns of the input sequence)
+        timeStep              % stride between evaluated steps when no RNN module is present (ignored otherwise, where tPool is the stride instead)
+        cnnWindowSize         % raw timesteps covered by one CNN output step (receptive field width)
+        cnnStepSize           % raw stride of the CNN window (1 with no pooling)
+        idxMap                % index boundaries used to slice flattened accumulated gradient vectors back into per-layer weight/bias tensors
+        eta                   % Adam learning rate (decays each epoch via learningRateDecay)
+        beta_1                % Adam beta1 (first-moment decay)
+        beta_2                % Adam beta2 (second-moment decay)
+        epsilon               % small constant added for numerical stability (Adam denominator, log(), etc.)
+        learningRateDecay     % multiplicative decay applied to eta after each epoch
+        t                     % Adam timestep counter (increments once per batch, drives bias correction)
+        learningHistory       % per-epoch log; column layout is subclass-specific
+        totalLossHistory      % per-batch loss (cross-entropy for Classifier, MSE for Predictor)
+        trainingMetricHistory % per-batch secondary metric (accuracy for Classifier, MAE for Predictor)
     end
- 
+	
     methods
         %% TemporalNeuralNet constructor: shared layer/idxMap/optimizer setup
+        % Not called directly (Abstract class), invoked via obj@TemporalNeuralNet(...) 
+        % from a subclass constructor.
+        %
+        % Inputs (all name-value, all optional):
+        %   'CNN'   - cell array of layer specs ({}, i.e. no CNN, by default):
+        %               {'conv', numChannels, inFeatures, outFeatures, kernelSize}
+        %               {'pool', poolingRatio}
+        %             inFeatures of each conv layer must equal outFeatures of the previous
+        %             one (or 1, for the first layer).
+        %   'RNN'   - cell array of recurrent layer specs ({} by default), each:
+        %               {'rnn',  inDim, hiddenDim, outDim}
+        %               {'gru',  inDim, outDim}
+        %               {'lstm', inDim, outDim}
+        %             inDim of the first layer must equal the CNN module's output width * tPool
+        %             (or numChannels * tPool if there's no CNN module); inDim of later layers must
+        %             equal the previous layer's outDim.
+        %   'FC'    - fully connected head spec: { [in, h1, ..., out] }, a single cell containing 
+        %             one size vector. Constructor errors if given but with fewer than 2 sizes; 
+        %             an entirely empty {} leaves fcModule as an empty
+        %             cell.
+        %   'tPool' - number of consecutive raw/CNN-output steps grouped into one RNN/FC input
+        %             frame (default 1)
+        %   'timeStep' - stride between evaluated steps when there's no RNN module, used to downsample
+        %             the input when there's not much new information between the input windows 
+        %             (default: tPool).
+        %             Ignored with a warning, if an RNN module is present (tPool is always the stride
+        %             in that case, since the RNN's hidden state needs every step to be seen in order).
+        %   'numChannels' - number of raw input channels (default 1)
+        %   'eta'   - initial Adam learning rate (default 0.5)
+        %   'learningRateDecay' - multiplicative decay applied to eta after every epoch (default 0.95)
+        %   'beta_1', 'beta_2' - Adam moment-decay hyperparameters (defaults 0.90, 0.999)
+        %
+        % Output: obj, with cnnModule/rnnModule/fcModule/idxMap built and optimizer state initialized.
+        % 
+
+
         function obj = TemporalNeuralNet(varargin)
             p = inputParser;
             addParameter(p,'CNN',               {},   @(x) iscell(x));
@@ -45,7 +93,7 @@ classdef (Abstract) TemporalNeuralNet < handle
             addParameter(p,'beta_1',            0.90, @(x) isnumeric(x)&&isscalar(x));
             addParameter(p,'beta_2',            0.999,@(x) isnumeric(x)&&isscalar(x));
             addParameter(p,'timeStep',          [],   @(x) isnumeric(x)&&isscalar(x));
-            addParameter(p,'numChannels',       16,   @(x) isnumeric(x)&&isscalar(x));
+            addParameter(p,'numChannels',       1,    @(x) isnumeric(x)&&isscalar(x));
             parse(p, varargin{:});
  
             convSpecs       = p.Results.CNN;
@@ -169,9 +217,26 @@ classdef (Abstract) TemporalNeuralNet < handle
             obj.trainingMetricHistory = [];
         end
  
-        %% forwardStep: shared CNN -> RNN -> FC pass over one fixed window
-        % The only difference between Classifier and Predictor is the final
-        % activation (softmax vs identity).
+        %% forward: shared CNN -> RNN -> FC pass over one fixed window
+        % Runs ONE pass over inputSequence and returns one output row per (tPool-sized)
+        % step within it, not autoregressive, not aware of any training loss. Classifier
+        % uses this directly as its own public forward(); Predictor wraps it in forecast()/
+        % forecastSequence() for multi-step rollout The only behavioral difference between
+        % subclasses is the final activation applied to each step's raw output (softmax vs.
+        % identity).
+        %
+        % Inputs:
+        %   inputSequence - [T x numChannels] raw window. T must be at least tPool. How many
+        %                   output rows you get back depends on tPool/timeStep.
+        %   'isTraining'  - (name-value pair, default false) if true, each layer caches its
+        %                   activations for backpropagation (obj.backwardPass() reads these
+        %                   afterward). If false, layers only keep enough state for a single
+        %                   forward pass.
+        %
+        % Output:
+        %   stepOutput - [numSteps x outputWidth], where numSteps = floor((T-tPool)/stepSize)+1
+        %                and stepSize is tPool if an RNN module is present, or timeStep 
+        %                otherwise.
         function stepOutput = forward(obj, inputSequence, varargin)
             p = inputParser;
             addParameter(p,'isTraining', false, @(x) islogical(x));
@@ -205,6 +270,9 @@ classdef (Abstract) TemporalNeuralNet < handle
         end
  
         %% adamOptimizer: caller function of 'applyAdam' in each layer
+        % Input: totalSamples_batch - normalizing factor for the step size
+        % 
+        % Produces no output, updates the weights and biases as a side effect
         function adamOptimizer(obj, totalSamples_batch)
             for i = 1:numel(obj.cnnModule)
                 if isa(obj.cnnModule{i}, "ConvolutionalLayer")
@@ -218,7 +286,7 @@ classdef (Abstract) TemporalNeuralNet < handle
                 obj.fcModule.applyAdam(obj.eta, obj.beta_1, obj.beta_2, totalSamples_batch, obj.t, obj.epsilon);
             end
         end
- 
+
         %% resetMemory: clear stored activations and hidden states before each new sequence
         function resetMemory(obj)
             for i = 1:numel(obj.cnnModule)
@@ -249,10 +317,34 @@ classdef (Abstract) TemporalNeuralNet < handle
     end
  
     methods (Abstract)
+        % Full training loop: training data segmentation (via segmentSequences),
+        % batching, backward pass (via backwardPass), Adam updates, per-epoch
+        % validation reporting (via evaluate), and learningHistory/checkpoint
+        % bookkeeping.
         train(obj, trainingData, validationData, epochs, batchSize, varargin)
+
+        % Backprop through FC/RNN/CNN for one sequence's worth of cached activations
+        % (i.e. one forward() call made with 'isTraining',true). Loss function and
+        % target lookup differ between subclasses (cross-entropy vs. MSE;
+        % windowed-label-average vs. next-raw-value).
         [cnnSeqUpdate, rnnSeqUpdate, fcSeqUpdate, totalLoss, totalSamples] = backwardPass(obj, output, target)
+
+        % Metric computation over a dataset (accuracy for Classifier, MAE for Predictor).
+        % Signature differs completely per subclass: Predictor additionally needs
+        % forecastLength/segmentLength to know how far ahead and from how much context
+        % to forecast.
         metricOut = evaluate(obj, data, varargin)
+
+        % Windowing strategy used by train() to slice each trial's raw% sequence into
+        % training segments. Differs completely between subclasses:
+        % Classifier: overlapping fixed-count segments;
+        % Predictor: one-step-shifted windows with reserved trailing target steps
         segmInfos = segmentSequences(obj, data, varargin)
+
+        % Final per-timestep activation applied inside forward(), on each step's raw
+        % FC output z.
+        % Classifier: softmax(z)
+        % Predictor: z unchanged
         a = outputActivation(obj, z)
     end
 end
