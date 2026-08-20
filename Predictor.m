@@ -395,6 +395,8 @@ classdef Predictor < TemporalNeuralNet
         %   output         - forward()'s teacher-forced output, [numSteps x numChannels]
         %   targetSequence - the full raw segment (context + reserved trailing step(s)) that
         %                    output(j,:) was predicting from
+		%   numActiveSteps - number of steps where the output error is backpropagated, used to
+		%                    calculate totalSamples
         %
         % Outputs:
         %   cnnSeqUpdate, rnnSeqUpdate, fcSeqUpdate - flat, idxMap-packed gradient vectors
