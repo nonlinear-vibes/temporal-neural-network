@@ -82,6 +82,11 @@ where: &ensp; sequence: `[T×C]` multichannel time-series (time × channels)\
 ## Demo:
 For a quick classification demonstration with syntetic data generation, run `demo.m`.\
 The classifier scales well to real data and has been tested on larger real-world sequence classification tasks with networks containing millions of parameters. The forecaster is newer, validated so far on real-world macroeconomic (inflation) forecasting.
+<br/><br/>
+<p align="center">
+  <img src="docs/euro_area.png" width="500" alt="inflation forecasting">
+</p>
+<p align="center">A 12-month autoregressive forecast and actual inflation in the Euro Area for 2025</p>
 
 ## Requirements:
 
