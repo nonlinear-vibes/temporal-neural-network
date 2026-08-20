@@ -11,7 +11,7 @@ All modules and layers are optional, but the order CNN $\rightarrow$ RNN $\right
 <p align="center">
   <img src="docs/training_demo.gif" width="750" alt="training demo">
 </p>
-<p align="center">Demo: CNN-GRU-FC architecture learning to distinguish three classes from synthetic data.</p>
+<p align="center">Demo: A CNN-GRU-FC architecture learning to distinguish three classes from synthetic data in real time.</p>
 
 ## Architecture:
  
@@ -86,7 +86,7 @@ The classifier scales well to real data and has been tested on larger real-world
 <p align="center">
   <img src="docs/euro_area.png" width="500" alt="inflation forecasting">
 </p>
-<p align="center">A 12-month autoregressive forecast and actual inflation in the Euro Area for 2025</p>
+<p align="center">A 12-month autoregressive inflation forecast.</p>
 
 ## Requirements:
 
