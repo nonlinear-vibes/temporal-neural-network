@@ -62,7 +62,7 @@ classdef Predictor < TemporalNeuralNet
             obj.numAutoregressiveSteps = p.Results.numAutoregressiveSteps;
             obj.outputWidth            = obj.numChannels;
 
-            initialMSE = obj.evaluate(validationData, obj.forecastLength, obj.trainingLength);
+            initialMSE = obj.evaluate(validationData, obj.forecastLength);
             obj.learningHistory = [0, obj.forecastLength, 0, initialMSE, NaN, NaN, NaN];
 
         end
@@ -176,8 +176,12 @@ classdef Predictor < TemporalNeuralNet
         %                 trial, [T x numChannels] each
         %   epochs      - number of full passes over trainingData
         %   batchSize   - training segments per Adam update
-        %   'numAutoregressiveSteps' - (name-value pair, default
-        %               obj.numAutoregressiveSteps) autoregressive steps per segment
+        %   'numAutoregressiveSteps' - (name-value pair, default obj.numAutoregressiveSteps)
+        %                 autoregressive steps per segment
+        %   'lastStepsOnlyLoss' - (name-value pair, default true) when set, train()
+        %                 backpropagates output errors only in the steps affected by the
+        %                 network's own predictions (error is still backpropagated through
+        %                 the hidden state)
         %
         % Output: none (mutates obj: weights, learningHistory, totalLossHistory,
         %         trainingMetricHistory; also saves a Predictor_trained_<timestamp>.mat
@@ -186,9 +190,11 @@ classdef Predictor < TemporalNeuralNet
 
             p = inputParser;
             addParameter(p,'numAutoregressiveSteps', obj.numAutoregressiveSteps, @(x) isnumeric(x)&&isscalar(x));
+            addParameter(p,'lastStepsOnlyLoss',      true,                       @(x) islogical(x));
             parse(p, varargin{:});
 
-            numAutoregSteps = p.Results.numAutoregressiveSteps;
+            numAutoregSteps   = p.Results.numAutoregressiveSteps;
+            lastStepsOnlyLoss = p.Results.lastStepsOnlyLoss;
             segmInfos = obj.segmentSequences(trainingData, obj.trainingLength, numAutoregSteps);
 
             for epochIdx = 1:epochs
@@ -238,10 +244,16 @@ classdef Predictor < TemporalNeuralNet
 
                             % build target sequence
                             targetSequence = trainSegment(autoregStep:end-numAutoregSteps+autoregStep,:);
-
+                            
                             output = obj.forward(contextSegment, 'isTraining', true);
 
-                            [cnnSeqUpdate, rnnSeqUpdate, fcSeqUpdate, totalAE, totalSE, totalSamples] = obj.backwardPass(output, targetSequence);
+                            if lastStepsOnlyLoss
+                                output(1:end-1,:) = contextSegment(1+obj.cnnWindowSize:obj.cnnStepSize:end-1,:);
+                                numActiveSteps    = ceil(autoregStep/obj.cnnStepSize);
+                            else
+                                numActiveSteps = size(output,1);   % every row counts, matches backwardPass's own default
+                            end
+                            [cnnSeqUpdate, rnnSeqUpdate, fcSeqUpdate, totalAE, totalSE, totalSamples] = obj.backwardPass(output, targetSequence, numActiveSteps);
 
                             contextSegment = [contextSegment(2:end,:); output(end,:)];
                          
@@ -320,7 +332,7 @@ classdef Predictor < TemporalNeuralNet
                 trainingMAE   = totalAE_epoch/totalSamples_epoch;
                 residual      = totalSE_epoch/totalSamples_epoch;
 
-                validationMAE = obj.evaluate(validationData, obj.forecastLength, obj.trainingLength);
+                validationMAE = obj.evaluate(validationData, obj.forecastLength);
                 obj.learningHistory(end+1,:) = [batchSize, numAutoregSteps, obj.eta, validationMAE, trainingMAE, residual, elapsedTime];
                 fprintf('Validation MAE: %.4f\n', validationMAE);
                 obj.eta = obj.learningRateDecay*obj.eta;
@@ -389,8 +401,11 @@ classdef Predictor < TemporalNeuralNet
         %   totalAE, totalSE - sum of absolute and squared error over this pass, normalized by
         %                    numChannels
         %   totalSamples   - number of steps in this pass
-        function [cnnSeqUpdate, rnnSeqUpdate, fcSeqUpdate, totalAE, totalSE, totalSamples] = backwardPass(obj, output, targetSequence)
+        function [cnnSeqUpdate, rnnSeqUpdate, fcSeqUpdate, totalAE, totalSE, totalSamples] = backwardPass(obj, output, targetSequence, numActiveSteps)
             outputLength = size(output,1);
+            if nargin < 4 || isempty(numActiveSteps)
+                numActiveSteps = outputLength;
+            end
 
             totalAE      = 0;
             totalSE      = 0;
@@ -469,7 +484,7 @@ classdef Predictor < TemporalNeuralNet
             if ~isempty(obj.cnnModule)
                 cnnSeqUpdate = cnnSeqUpdate + localCnnUpdate;
             end
-            totalSamples = totalSamples + outputLength;
+            totalSamples = totalSamples + numActiveSteps;
         end
 
         %% segmentSequences: one-step-shifted segment indices for forecasting
@@ -484,7 +499,7 @@ classdef Predictor < TemporalNeuralNet
         % Output:
         %   segmInfos - [M x 3]: [trialIdx, startIdx, endIdx] per segment, M = total windows
         %               across all trials
-        function segmInfos = segmentSequences(trainingData, segmentLength, forecastLength)
+        function segmInfos = segmentSequences(obj, trainingData, segmentLength, forecastLength)
 
             if nargin < 3 || isempty(forecastLength)
                 forecastLength = 1;
